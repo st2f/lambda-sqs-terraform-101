@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "npm run build:lambda",
+    "build:lambda": "esbuild src/handler.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handler.js",
     "invoke": "node --import tsx src/invoke.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -11,6 +13,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vitest": "^5.0.0"

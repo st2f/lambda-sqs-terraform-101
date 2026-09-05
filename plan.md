@@ -45,31 +45,6 @@ The Lambda may simply validate the message and log what it would do.
 
 Keep each increment independently understandable.
 
-Do not build ahead.
-
-At each increment:
-
-1. Explain what currently exists.
-2. Explain what is changing.
-3. Explain which Terraform resource controls it.
-4. Explain what AWS resource/runtime behavior should change.
-5. Show me how to verify that assumption after deployment.
-6. If something fails, guide me to inspect the actual runtime state before changing code.
-
-Prefer:
-
-```text
-change
-→ terraform plan
-→ understand plan
-→ apply
-→ trigger
-→ observe
-→ explain result
-```
-
-rather than simply generating infrastructure and declaring it complete.
-
 ---
 
 ## Constraints
@@ -89,17 +64,18 @@ rather than simply generating infrastructure and declaring it complete.
 - Do not introduce CDK or Serverless Framework.
 - Do not introduce LocalStack or MiniStack initially.
 - Do not build generic Terraform modules initially.
-- Keep Terraform resources explicit so their relationships are visible.
-- Prefer AWS CLI commands for manual triggering and inspection when useful.
-- Assume this project uses a dedicated personal/dev AWS account or otherwise isolated AWS environment.
-- Add consistent resource naming and tags.
-- Keep costs negligible and explain any resource that could generate ongoing cost.
-- Never use proprietary work code, resource names, message formats, ARNs, account IDs, infrastructure, or architecture.
-- Never connect this lab to work AWS resources.
+- Keep Terraform resources explicit.
+- Use AWS CLI for manual experiments.
+- Use only an isolated personal/dev AWS account.
+- Apply consistent names and tags.
+- Explain ongoing costs.
+- Never connect to work resources.
+- Do not hide or swallow failures.
+- Keep costs negligible.
+- Never use proprietary work identifiers or architecture.
 - Do not optimize for production scale.
-- Do not hide failures.
-- Do not catch exceptions merely to make Lambda invocations appear successful.
-- When introducing retries or DLQs, make failures deliberately observable.
+- Do not catch exceptions merely to report success.
+- Make retry and DLQ failures deliberately observable.
 
 ---
 

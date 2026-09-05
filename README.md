@@ -56,8 +56,102 @@ resource. Those boundaries are introduced and verified in later increments.
 
 ## Project commands
 
+- `npm run build` — bundle the handler into `dist/handler.js` for Lambda.
 - `npm run invoke` — invoke the handler locally with the example event.
 - `npm test` — run the handler test once with Vitest.
 - `npm run typecheck` — ask TypeScript to check the project without emitting
   JavaScript.
 - `npm run check` — run both the type checker and tests.
+
+## Increment 2
+
+Increment 2 deploys the same handler as one AWS Lambda function. There is no
+SQS queue or event source mapping yet.
+
+```text
+Terraform ──creates──> Lambda ──writes──> CloudWatch Logs
+                         │
+                         └──assumes──> IAM execution role
+```
+
+The configuration is kept explicit in `terraform/`:
+
+- `aws_lambda_function.image_processor` configures the code archive, Node.js
+  runtime, exported handler, memory, timeout, and execution role.
+- `aws_iam_role.lambda` trusts the Lambda service to assume the role.
+- `aws_iam_role_policy_attachment.lambda_basic_execution` attaches AWS's basic
+  logging policy to that role. This is the Lambda's permission to write logs;
+  it is not permission for a human to invoke the function.
+- `aws_cloudwatch_log_group.lambda` manages the log group and retains logs for
+  seven days rather than leaving an automatically created group behind.
+- `archive_file.lambda` packages the compiled JavaScript and calculates the
+  content hash that tells Terraform when deployed code has changed.
+
+The AWS provider translates the resource declarations into AWS API calls. Its
+version constraint is in `terraform/versions.tf`; `terraform init` records the
+exact selected versions in `.terraform.lock.hcl`.
+
+### Build and inspect the plan
+
+Use AWS credentials for a dedicated personal/dev account, then run:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform init
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-2.tfplan
+terraform -chdir=terraform show increment-2.tfplan
+```
+
+The plan should add one Lambda, one execution role, one logging-policy
+attachment, and one log group. A plan is a proposed change calculated from the
+configuration, Terraform state, and current AWS state; inspect it before apply.
+
+### Deploy and prove what is running
+
+Apply the already-reviewed saved plan:
+
+```bash
+terraform -chdir=terraform apply increment-2.tfplan
+terraform -chdir=terraform output
+```
+
+Terraform state records the mapping between resource addresses in this project
+and remote AWS objects. It is not a runtime health check and must not contain
+secrets committed to Git.
+
+Invoke the deployed function and inspect the response:
+
+```bash
+aws lambda invoke \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"jobId":"job-123","imageId":"image-456","operation":"resize"}' \
+  lambda-response.json
+
+cat lambda-response.json
+```
+
+Then inspect the deployed configuration and recent logs:
+
+```bash
+aws lambda get-function-configuration \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)"
+
+terraform -chdir=terraform output -raw lambda_source_code_hash
+
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 10m
+```
+
+Together, these checks prove different things: Terraform state identifies the
+managed object, `get-function-configuration` shows the actual AWS runtime and
+handler configuration, the successful invocation proves the archive can load,
+and CloudWatch logs prove that the deployed handler processed the expected
+event. The Lambda ARN output is the stable AWS identifier other services will
+reference in later increments.

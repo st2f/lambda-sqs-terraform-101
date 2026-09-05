@@ -28,4 +28,3 @@ export async function handler(event: ImageJobEvent): Promise<ImageJobResult> {
     status: "accepted",
   };
 }
-
