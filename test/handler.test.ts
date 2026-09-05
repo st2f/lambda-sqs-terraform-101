@@ -1,0 +1,31 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { handler } from "../src/handler.js";
+
+describe("handler", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("logs the image job and returns a successful result", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const result = await handler({
+      jobId: "job-123",
+      imageId: "image-456",
+      operation: "resize",
+    });
+
+    expect(result).toEqual({
+      jobId: "job-123",
+      status: "accepted",
+    });
+    expect(log).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(log.mock.calls[0][0]))).toEqual({
+      message: "Image job received",
+      jobId: "job-123",
+      imageId: "image-456",
+      operation: "resize",
+    });
+  });
+});
