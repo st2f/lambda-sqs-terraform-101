@@ -155,3 +155,149 @@ handler configuration, the successful invocation proves the archive can load,
 and CloudWatch logs prove that the deployed handler processed the expected
 event. The Lambda ARN output is the stable AWS identifier other services will
 reference in later increments.
+
+## Increment 3
+
+Increment 3 keeps the infrastructure from increment 2 and makes Lambda's
+runtime signals observable. The handler now treats `jobId: "FAIL"` as a poison
+test value: it logs the received job and then throws an `Error`. The error is
+deliberately not caught, so Lambda records the invocation as failed.
+
+### Prepare and deploy the code change
+
+First run the local checks and rebuild the deployment artifact:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform plan -out=increment-3.tfplan
+terraform -chdir=terraform show increment-3.tfplan
+```
+
+The plan should update `aws_lambda_function.image_processor` in place because
+the archive's `source_code_hash` changed. It should not add or remove resources.
+After reviewing that result, deploy the saved plan:
+
+```bash
+terraform -chdir=terraform apply increment-3.tfplan
+```
+
+This deployment is part of the experiment: the observations below are only
+meaningful after AWS has the new handler code.
+
+### Invoke successes and one failure
+
+Invoke three successful jobs. `--log-type Tail` asks Lambda to include the last
+4 KB of execution logs in each synchronous response; decoding `LogResult`
+makes the application and platform records immediately visible.
+
+```bash
+for job_id in job-101 job-102 job-103; do
+  aws lambda invoke \
+    --region "$(terraform -chdir=terraform output -raw aws_region)" \
+    --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+    --cli-binary-format raw-in-base64-out \
+    --log-type Tail \
+    --payload "{\"jobId\":\"${job_id}\",\"imageId\":\"image-456\",\"operation\":\"resize\"}" \
+    --query 'LogResult' \
+    --output text \
+    success-response.json | base64 --decode
+done
+
+cat success-response.json
+```
+
+Now invoke the intentional failure. The `invoke` API call itself can succeed
+while the function fails, so do not use only the shell exit status as the
+result. `FunctionError: Unhandled` in the CLI response and the error document
+in `failure-response.json` are the important distinction.
+
+```bash
+aws lambda invoke \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --cli-binary-format raw-in-base64-out \
+  --log-type Tail \
+  --payload '{"jobId":"FAIL","imageId":"image-456","operation":"resize"}' \
+  --query '{FunctionError:FunctionError,LogResult:LogResult}' \
+  --output json \
+  failure-response.json > failure-invoke-metadata.json
+
+cat failure-response.json
+cat failure-invoke-metadata.json
+```
+
+The command separates the function response payload from the AWS API metadata.
+Decode the failure's `LogResult` to see its logs without waiting for CloudWatch
+Logs search (`jq` extracts the base64 field from the metadata JSON):
+
+```bash
+jq -r '.LogResult' failure-invoke-metadata.json | base64 --decode
+```
+
+Expect three successes, one error, and four total invocations if these are the
+only calls in the selected metric time window.
+
+### Inspect the CloudWatch log hierarchy
+
+The log group belongs to the function and survives across execution
+environments. A log stream normally represents one Lambda execution
+environment and can therefore contain multiple invocations.
+
+```bash
+aws logs describe-log-groups \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --log-group-name-prefix "$(terraform -chdir=terraform output -raw lambda_log_group_name)"
+
+aws logs describe-log-streams \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --log-group-name "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --order-by LastEventTime \
+  --descending
+
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 15m
+```
+
+For each invocation, compare the structured `Image job received` application
+log with Lambda's platform-generated `START`, `END`, and `REPORT` records. The
+same request ID correlates those records. `REPORT` includes billed and actual
+duration, memory configuration, and peak memory use. A failed invocation also
+contains the uncaught error and stack trace.
+
+### Inspect invocation and error metrics
+
+CloudWatch metrics can take a few minutes to appear. These commands use a
+30-minute UTC window and five-minute buckets; on macOS, `date -v-30M` computes
+the start of that window.
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --namespace AWS/Lambda \
+  --metric-name Invocations \
+  --dimensions "Name=FunctionName,Value=$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --statistics Sum \
+  --period 300 \
+  --start-time "$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+aws cloudwatch get-metric-statistics \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --namespace AWS/Lambda \
+  --metric-name Errors \
+  --dimensions "Name=FunctionName,Value=$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --statistics Sum \
+  --period 300 \
+  --start-time "$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+`Invocations` counts attempts, whether successful or failed. `Errors` counts
+invocations where the function returned an error. CloudWatch publishes these
+as separate time-series data, not by parsing your application log messages.
+Throwing matters when an AWS service invokes Lambda because the failure signal
+is what lets that integration retry or route failed work. Catching the error
+and returning success would hide that signal even if an error message were
+logged.

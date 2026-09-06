@@ -28,4 +28,24 @@ describe("handler", () => {
       operation: "resize",
     });
   });
+
+  it("throws for the intentional failure event", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await expect(
+      handler({
+        jobId: "FAIL",
+        imageId: "image-456",
+        operation: "resize",
+      }),
+    ).rejects.toThrow("Intentional failure for observation exercise");
+
+    expect(log).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(log.mock.calls[0][0]))).toEqual({
+      message: "Image job received",
+      jobId: "FAIL",
+      imageId: "image-456",
+      operation: "resize",
+    });
+  });
 });
