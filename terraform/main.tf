@@ -60,3 +60,9 @@ resource "aws_lambda_function" "image_processor" {
     aws_iam_role_policy_attachment.lambda_basic_execution,
   ]
 }
+
+resource "aws_sqs_queue" "image_jobs" {
+  name = "${local.function_name}-image-jobs"
+
+  visibility_timeout_seconds = 30
+}

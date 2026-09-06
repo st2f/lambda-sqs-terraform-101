@@ -301,3 +301,149 @@ Throwing matters when an AWS service invokes Lambda because the failure signal
 is what lets that integration retry or route failed work. Catching the error
 and returning success would hide that signal even if an error message were
 logged.
+
+## Increment 4
+
+Increment 4 adds one standard SQS queue but does not connect it to Lambda:
+
+```text
+AWS CLI ──send/receive/delete──> SQS
+
+Lambda (still invoked manually; no connection to SQS yet)
+```
+
+`aws_sqs_queue.image_jobs` uses a deliberately short 30-second visibility
+timeout. Receiving a message temporarily hides it; it does not acknowledge or
+delete it. If the receiver does not delete the message before that timeout
+expires, SQS makes it eligible for delivery again.
+
+### Plan and deploy the queue
+
+Format and validate the Terraform configuration, then inspect a saved plan:
+
+```bash
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-4.tfplan
+terraform -chdir=terraform show increment-4.tfplan
+```
+
+The plan should add exactly one `aws_sqs_queue.image_jobs` resource and three
+outputs. It should not change the Lambda, its IAM role, or its log group. After
+reviewing the plan, apply it and inspect the output values:
+
+```bash
+terraform -chdir=terraform apply increment-4.tfplan
+terraform -chdir=terraform output
+```
+
+The queue URL is its regional SQS API endpoint and is used by commands that
+operate on messages. The ARN is the global AWS identifier used in IAM policies
+and service integrations. The queue name is the human-readable final component
+of both identifiers.
+
+### Send and inspect one message
+
+Send one image job and retain the returned message ID:
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"job-201","imageId":"image-456","operation":"resize"}'
+```
+
+`MessageId` identifies the stored message. It is not the token used to delete
+a received copy. Inspect the queue's identity, configured timeout, and
+approximate visible-message count:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names QueueArn VisibilityTimeout ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+The approximate counters are eventually consistent, so a freshly sent or
+received message might not be reflected immediately.
+
+### Receive without deleting
+
+Receive the message and save the full response. `ApproximateReceiveCount`
+starts at 1 and helps demonstrate redelivery:
+
+```bash
+aws sqs receive-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --max-number-of-messages 1 \
+  --wait-time-seconds 2 \
+  --message-system-attribute-names ApproximateReceiveCount SentTimestamp \
+  > first-receive.json
+
+jq '.Messages[0] | {MessageId, ReceiptHandle, Attributes, Body}' first-receive.json
+```
+
+The receipt handle identifies this particular receipt of the message. It is
+opaque and can be long. Immediately try another receive:
+
+```bash
+aws sqs receive-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --max-number-of-messages 1 \
+  --wait-time-seconds 2
+```
+
+An empty response is expected because the first receive made the message
+invisible for 30 seconds. Now let that visibility timeout expire and receive
+again:
+
+```bash
+sleep 32
+
+aws sqs receive-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --max-number-of-messages 1 \
+  --wait-time-seconds 2 \
+  --message-system-attribute-names ApproximateReceiveCount SentTimestamp \
+  > second-receive.json
+
+jq '.Messages[0] | {MessageId, ReceiptHandle, Attributes, Body}' second-receive.json
+```
+
+The second response should contain the same message ID and body, an
+`ApproximateReceiveCount` of 2, and a new receipt handle. Standard queues use
+at-least-once delivery, so consumers must also tolerate duplicates. Letting the
+visibility timeout expire is the easiest way to demonstrate a redelivery
+deliberately.
+
+### Delete the received message
+
+Delete using the newest receipt handle:
+
+```bash
+aws sqs delete-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' second-receive.json)"
+
+aws sqs receive-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --max-number-of-messages 1 \
+  --wait-time-seconds 2
+```
+
+The final receive should be empty. Deleting acknowledges this delivery and
+tells SQS that the consumer no longer wants the message delivered. SQS cannot
+verify whether the consumer's application-level processing was correct;
+deletion expresses only the consumer's decision. Without deletion, SQS makes
+the message available again after the visibility timeout, regardless of what
+the consumer actually did.
+
+SQS has no continuously running compute in this design, but API requests and
+data transfer can incur usage charges. The small number of requests and tiny
+payloads in this lab should be negligible; the queue remains deployed until a
+later `terraform destroy` removes it.

@@ -27,3 +27,18 @@ output "lambda_log_group_name" {
   description = "CloudWatch Logs group receiving the Lambda's logs."
   value       = aws_cloudwatch_log_group.lambda.name
 }
+
+output "image_jobs_queue_url" {
+  description = "Regional HTTPS endpoint used by the SQS data-plane API."
+  value       = aws_sqs_queue.image_jobs.url
+}
+
+output "image_jobs_queue_arn" {
+  description = "Globally unique AWS identifier used in IAM and integrations."
+  value       = aws_sqs_queue.image_jobs.arn
+}
+
+output "image_jobs_queue_name" {
+  description = "Name of the standard image-jobs queue."
+  value       = aws_sqs_queue.image_jobs.name
+}
