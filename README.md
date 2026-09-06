@@ -1,10 +1,59 @@
 # Lambda + SQS + Terraform 101
 
-This learning project builds a small image-processing workflow one increment at
-a time. Increment 1 is a minimal TypeScript Lambda handler invoked entirely on
-the local machine. It does not create or contact any AWS resources.
+This repository is a hands-on lab for learning how a TypeScript and Node.js
+backend behaves when AWS Lambda consumes work from Amazon SQS. Terraform keeps
+the infrastructure and service relationships explicit, while AWS CLI exercises
+make the deployed behavior observable rather than treating a successful
+deployment as proof that the system works.
 
-## Increment 1
+The project grows in small increments from a locally invoked handler to queue
+polling, retries, dead-letter queues, batch failure handling, FIFO ordering,
+CloudWatch observability, and Terraform state and drift exercises. Each
+increment introduces one main behavior, predicts its effect, and then verifies
+it using logs, metrics, queue state, or controlled failures.
+
+The image-processing domain is intentionally fictional and no images are
+processed. This is a learning environment, not a production template: the code
+stays small so the boundaries between application behavior, Lambda, SQS, IAM,
+and Terraform remain easy to inspect.
+
+## Contents
+
+- [Project commands](#project-commands)
+- [1. Minimal TypeScript Lambda Locally](#1-minimal-typescript-lambda-locally)
+- [2. Deploy One Lambda With Terraform](#2-deploy-one-lambda-with-terraform)
+- [3. Observe Lambda in AWS](#3-observe-lambda-in-aws)
+- [4. Add a Standard SQS Queue With Terraform](#4-add-a-standard-sqs-queue-with-terraform)
+- [5. Connect SQS to Lambda](#5-connect-sqs-to-lambda)
+- 6\. Inspect an Actual SQS Lambda Event
+- 7\. Introduce a Processing Failure
+- 8\. Visibility Timeout Versus Lambda Timeout
+- 9\. Add a Dead-Letter Queue
+- 10\. Debug a Message in the DLQ
+- 11\. Redrive a Corrected Message Manually
+- 12\. Process a Batch
+- 13\. Understand Whole-Batch Failure
+- 14\. Add Partial Batch Responses
+- 15\. Terraform Change → Runtime Consequence Exercise
+- 16\. Break the Event Source Mapping
+- 17\. Break IAM Deliberately
+- 18\. Add Structured Logging
+- 19\. Observe Useful Metrics
+- 20\. Add One CloudWatch Alarm
+- 21\. Introduce a FIFO Queue
+- 22\. FIFO Poison Message
+- 23\. FIFO + Partial Batch Failure
+- 24\. Add Concurrency Observation
+- 25\. Terraform State and Runtime State
+- 26\. Terraform Drift Exercise
+- 27\. Add Integration/Smoke Tests Against AWS
+- 28\. Deliberately Create Several Failure Categories
+- 29\. Reconstruct the System From Terraform
+- 30\. Review a Terraform Diff
+- 31\. Optional: AWS Lambda Powertools
+- 32\. Optional: Local Emulation
+
+## 1. Minimal TypeScript Lambda Locally
 
 The sample event represents an image job:
 
@@ -63,7 +112,7 @@ resource. Those boundaries are introduced and verified in later increments.
   JavaScript.
 - `npm run check` — run both the type checker and tests.
 
-## Increment 2
+## 2. Deploy One Lambda With Terraform
 
 Increment 2 deploys the same handler as one AWS Lambda function. There is no
 SQS queue or event source mapping yet.
@@ -156,7 +205,7 @@ and CloudWatch logs prove that the deployed handler processed the expected
 event. The Lambda ARN output is the stable AWS identifier other services will
 reference in later increments.
 
-## Increment 3
+## 3. Observe Lambda in AWS
 
 Increment 3 keeps the infrastructure from increment 2 and makes Lambda's
 runtime signals observable. The handler now treats `jobId: "FAIL"` as a poison
@@ -302,7 +351,7 @@ is what lets that integration retry or route failed work. Catching the error
 and returning success would hide that signal even if an error message were
 logged.
 
-## Increment 4
+## 4. Add a Standard SQS Queue With Terraform
 
 Increment 4 adds one standard SQS queue but does not connect it to Lambda:
 
@@ -448,7 +497,7 @@ data transfer can incur usage charges. The small number of requests and tiny
 payloads in this lab should be negligible; the queue remains deployed until a
 later `terraform destroy` removes it.
 
-## Increment 5
+## 5. Connect SQS to Lambda
 
 Increment 5 connects the standard queue to the existing Lambda:
 
