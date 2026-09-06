@@ -66,3 +66,31 @@ resource "aws_sqs_queue" "image_jobs" {
 
   visibility_timeout_seconds = 30
 }
+
+data "aws_iam_policy_document" "lambda_sqs" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "sqs:DeleteMessage",
+      "sqs:GetQueueAttributes",
+      "sqs:ReceiveMessage",
+    ]
+    resources = [aws_sqs_queue.image_jobs.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_sqs" {
+  name   = "${local.function_name}-sqs-consumer"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.lambda_sqs.json
+}
+
+resource "aws_lambda_event_source_mapping" "image_jobs" {
+  event_source_arn = aws_sqs_queue.image_jobs.arn
+  function_name    = aws_lambda_function.image_processor.arn
+
+  batch_size = 1
+  enabled    = true
+
+  depends_on = [aws_iam_role_policy.lambda_sqs]
+}

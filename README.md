@@ -447,3 +447,132 @@ SQS has no continuously running compute in this design, but API requests and
 data transfer can incur usage charges. The small number of requests and tiny
 payloads in this lab should be negligible; the queue remains deployed until a
 later `terraform destroy` removes it.
+
+## Increment 5
+
+Increment 5 connects the standard queue to the existing Lambda:
+
+```text
+AWS CLI ──send──> SQS
+                    ↑ poll/receive/delete
+            Lambda event source mapping
+                    ↓ invoke
+                  Lambda
+```
+
+SQS does not call the handler directly. The Lambda service manages pollers for
+the event source mapping. A poller receives messages using the Lambda execution
+role's permissions, invokes the function with a batch, and deletes successfully
+processed messages from SQS. With the mapping's `batch_size` set to 1, each
+invocation receives at most one message during this exercise.
+
+Two Terraform resources create the required behavior:
+
+- `aws_iam_role_policy.lambda_sqs` lets the execution role call
+  `ReceiveMessage`, `DeleteMessage`, and `GetQueueAttributes` on this queue
+  only. Although the handler does not call the SQS API itself, the managed
+  poller uses these execution-role permissions on the function's behalf.
+- `aws_lambda_event_source_mapping.image_jobs` creates the polling relationship.
+  Its `event_source_arn` identifies the queue, while `function_name` identifies
+  the invocation target. The queue URL is not used for this relationship.
+
+### Plan and deploy the connection
+
+Run the local checks and build first because Terraform still evaluates the
+Lambda deployment archive while planning:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-5.tfplan
+terraform -chdir=terraform show increment-5.tfplan
+```
+
+The plan should add one inline IAM role policy and one Lambda event source
+mapping. It should not replace the queue, Lambda, execution role, or log group.
+After reviewing the plan, apply it:
+
+```bash
+terraform -chdir=terraform apply increment-5.tfplan
+```
+
+The explicit `depends_on` makes Terraform wait until the queue permissions have
+been attached before asking AWS to create the mapping. This is needed because
+AWS validates the function role's SQS permissions when the mapping is created.
+
+### Inspect the polling relationship
+
+Inspect the deployed mapping before sending a message:
+
+```bash
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EventSourceMappings[].{UUID:UUID,State:State,BatchSize:BatchSize,EventSourceArn:EventSourceArn,FunctionArn:FunctionArn}'
+```
+
+Expect one mapping with state `Enabled`, batch size `1`, the queue ARN as its
+event source, and the Lambda ARN as its target. If its state is briefly
+`Creating` or `Enabling`, wait and inspect it again before continuing.
+
+### Send one message through SQS
+
+Send a new image job and note the returned `MessageId`:
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"job-301","imageId":"image-456","operation":"resize"}'
+```
+
+A successful `SendMessage` response proves that SQS accepted the message. The
+enabled poller may receive it too quickly for an approximate queue counter to
+show `1`, so that counter is not a reliable way to capture every transition.
+
+Wait a few seconds, then inspect recent Lambda logs:
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 5m
+```
+
+A new Lambda request proves that the event source mapping invoked the function.
+The current handler logs `Image job received`, but its `jobId`, `imageId`, and
+`operation` properties are missing. This is expected: Lambda supplied an SQS
+event whose messages are inside a `Records` array, while the TypeScript handler
+still assumes that the image job is the top-level event. TypeScript types are
+removed during compilation and therefore do not validate an AWS event at
+runtime. Increment 6 will inspect and parse the real SQS event shape.
+
+### Verify successful consumption
+
+Inspect the queue after the invocation:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+
+aws sqs receive-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --max-number-of-messages 1 \
+  --wait-time-seconds 2
+```
+
+Both approximate counters should settle at `0`, and the manual receive should
+be empty. The event source mapping considered the invocation successful because
+the handler resolved rather than throwing, so its poller deleted the message.
+As established in increment 4, this deletion records the consumer's decision
+that no further delivery is required; it does not prove that the handler's
+application-level interpretation was correct.
+
+Once connected, the poller continuously performs SQS receives, including when
+the queue is empty. This can incur SQS request charges, though the cost of this
+small learning setup should remain negligible.
