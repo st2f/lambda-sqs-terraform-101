@@ -26,7 +26,7 @@ and Terraform remain easy to inspect.
 - [4. Add a Standard SQS Queue With Terraform](#4-add-a-standard-sqs-queue-with-terraform)
 - [5. Connect SQS to Lambda](#5-connect-sqs-to-lambda)
 - [6. Inspect an Actual SQS Lambda Event](#6-inspect-an-actual-sqs-lambda-event)
-- 7\. Introduce a Processing Failure
+- [7. Introduce a Processing Failure](#7-introduce-a-processing-failure)
 - 8\. Visibility Timeout Versus Lambda Timeout
 - 9\. Add a Dead-Letter Queue
 - 10\. Debug a Message in the DLQ
@@ -65,7 +65,8 @@ The sample event represents an image job:
 }
 ```
 
-Install the development dependencies, invoke the handler, and run the checks:
+Install the development dependencies, process one job locally, and run the
+checks:
 
 ```bash
 npm install
@@ -77,18 +78,19 @@ Expected invocation output includes a structured JSON log and the successful
 result:
 
 ```text
-Invoking handler locally...
+Processing an image job locally...
 {"message":"Image job received","jobId":"job-123","imageId":"image-456","operation":"resize"}
-Handler result: {"jobId":"job-123","status":"accepted"}
+Processing result: {"jobId":"job-123","status":"accepted"}
 ```
 
 ### Concepts introduced
 
-- **Handler:** the exported `handler` function is the entry point that AWS
-  Lambda will call after it is deployed in a later increment.
-- **Invocation:** one execution of the handler. `src/invoke.ts` performs a local
-  invocation by calling the function like any other JavaScript function.
-- **Event:** the input value supplied to a handler. Here TypeScript's
+- **Application function:** `processImageJob` implements the behavior without
+  depending on an AWS delivery format. A delivery-specific handler will call
+  it after the application is connected to an event source.
+- **Invocation:** one execution of the function. `src/invoke.ts` performs a
+  local invocation by calling it like any other JavaScript function.
+- **Event:** the input value supplied to the function. Here TypeScript's
   `ImageJobEvent` interface documents and checks the shape during development;
   it does not validate data at runtime.
 - **Execution environment:** in AWS, Lambda creates and reuses an isolated
@@ -105,17 +107,17 @@ resource. Those boundaries are introduced and verified in later increments.
 
 ## Project commands
 
-- `npm run build` — bundle the handler into `dist/handler.js` for Lambda.
-- `npm run invoke` — invoke the handler locally with the example event.
-- `npm test` — run the handler test once with Vitest.
+- `npm run build` — bundle the SQS handler into `dist/handler.js` for Lambda.
+- `npm run invoke` — process the example image job locally.
+- `npm test` — run the tests once with Vitest.
 - `npm run typecheck` — ask TypeScript to check the project without emitting
   JavaScript.
 - `npm run check` — run both the type checker and tests.
 
 ## 2. Deploy One Lambda With Terraform
 
-Increment 2 deploys the same handler as one AWS Lambda function. There is no
-SQS queue or event source mapping yet.
+Increment 2 deploys the image-job behavior as one AWS Lambda function. There is
+no SQS queue or event source mapping yet.
 
 ```text
 Terraform ──creates──> Lambda ──writes──> CloudWatch Logs
@@ -689,3 +691,149 @@ Repeat the log command if delivery logs have not appeared yet.
 You sent only the body; AWS supplied the envelope. `JSON.parse` turns that
 body into the application job. Matching the send response's message ID to the
 logs confirms this distinction in an actual delivery.
+
+Layers:
+
+```txt
+SQS delivery event
+       ↓
+handler-sqs.ts        transport/delivery adapter
+       ↓
+ImageJobEvent
+       ↓
+process-image-job.ts  application/business behavior
+       ↓
+ImageJobResult
+```
+
+Flow:
+
+```txt
+aws sqs send-message
+        │
+        │ body = '{"jobId":"job-601", ...}'
+        ▼
+     SQS queue
+        │
+        │ AWS-managed Lambda poller receives message
+        ▼
+SQS Lambda event
+{
+  "Records": [{
+    "messageId": "...",
+    "body": "{\"jobId\":\"job-601\",...}",
+    "attributes": { ... }
+  }]
+}
+        │
+        ▼
+handler-sqs.ts
+  1. Selects/logs SQS delivery metadata
+  2. Parses Records[0].body
+  3. Calls processImageJob with the parsed job
+        │
+        ▼
+process-image-job.ts
+{
+  jobId: "job-601",
+  imageId: "image-456",
+  operation: "resize"
+}
+```
+
+## 7. Introduce a Processing Failure
+
+Observe how the Lambda event source mapping responds when message processing
+throws an error. A successful invocation lets the managed poller delete the
+SQS message; a failed invocation does not. The same message can therefore
+become available and be delivered again.
+
+This increment uses the existing failure marker in `src/process-image-job.ts`
+and the SQS adapter in `src/handler-sqs.ts`. `test/handler-sqs.test.ts` proves
+locally that an SQS message with `jobId: "FAIL"` rejects with the intentional
+error.
+
+Prerequisite: a deployed Lambda using `handler-sqs.ts`, connected to a standard
+SQS queue by an enabled event source mapping with batch size 1. The queue must
+contain no valuable messages because the final cleanup purges it.
+
+### Verify the failure behavior and connection
+
+Run the local checks, then confirm that the event source mapping is enabled:
+
+```bash
+npm run check
+
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EventSourceMappings[].{State:State,BatchSize:BatchSize}'
+```
+
+Expect one mapping with state `Enabled` and batch size `1`. No build, Terraform
+plan, or deployment is required because the deployed handler already contains
+this controlled failure path.
+
+### Send one failing job
+
+Send the poison test message and save its `MessageId` from the response:
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"FAIL","imageId":"image-456","operation":"resize"}'
+```
+
+Follow the Lambda logs while the event source mapping processes the message:
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 1m \
+  --follow
+```
+
+Keep the command running until the same SQS `messageId` appears in at least two
+invocations, then stop it with Control-C. Retries are asynchronous and Lambda
+backs off after failures, so do not rely on an exact delay.
+
+Compare these fields across the attempts:
+
+| Observation                                 | Meaning                                                           |
+| ------------------------------------------- | ----------------------------------------------------------------- |
+| Same SQS `messageId` and body               | This is another delivery of the original message, not a new send. |
+| Increasing `ApproximateReceiveCount`        | SQS has handed out the message more than once.                    |
+| Different Lambda request IDs                | Each delivery caused a separate invocation attempt.               |
+| Intentional error after the application log | Processing began, then the handler rejected the invocation.       |
+
+The thrown error is the failure signal. Because the batch contains one record,
+the entire batch fails and the poller does not delete its message. The message
+later becomes eligible for another receive. This demonstrates at-least-once
+delivery: a consumer must be prepared to process the same message more than
+once.
+
+### Stop the poison-message loop
+
+There is no dead-letter queue in this increment, so the message otherwise keeps
+failing and returning to the source queue until its retention period expires.
+Purge this dedicated lab queue after observing the retry:
+
+```bash
+aws sqs purge-queue \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)"
+
+sleep 65
+
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+Purging removes every message in the queue, including messages temporarily in
+flight, and AWS can take up to 60 seconds to complete it. The two approximate
+message counters should settle at `0`. A later increment will replace this
+manual cleanup with a dead-letter queue and a finite receive policy.

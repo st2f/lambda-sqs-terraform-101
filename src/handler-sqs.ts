@@ -1,5 +1,8 @@
-import { handler as handleImageJob } from "./handler.js";
-import type { ImageJobEvent, ImageJobResult } from "./handler.js";
+import {
+  processImageJob,
+  type ImageJobEvent,
+  type ImageJobResult,
+} from "./process-image-job.js";
 
 // Only the SQS fields used by this handler; AWS supplies additional fields.
 export interface SqsEvent {
@@ -22,7 +25,7 @@ export async function handler(
   event: ImageJobEvent | SqsEvent,
 ): Promise<ImageJobResult> {
   if (!("Records" in event)) {
-    return handleImageJob(event);
+    return processImageJob(event);
   }
 
   // This increment uses batch_size = 1. Reject rather than ignore extra work.
@@ -60,7 +63,7 @@ export async function handler(
     throw new Error("Invalid image job");
   }
 
-  return handleImageJob({
+  return processImageJob({
     jobId: job.jobId,
     imageId: job.imageId,
     operation: job.operation,

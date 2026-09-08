@@ -1,5 +1,7 @@
-import { handler } from "./handler.js";
-import type { ImageJobEvent } from "./handler.js";
+import {
+  processImageJob,
+  type ImageJobEvent,
+} from "./process-image-job.js";
 
 const event: ImageJobEvent = {
   jobId: "job-123",
@@ -7,7 +9,6 @@ const event: ImageJobEvent = {
   operation: "resize",
 };
 
-console.log("Invoking handler locally...");
-const result = await handler(event);
-console.log("Handler result:", JSON.stringify(result));
-
+console.log("Processing an image job locally...");
+const result = await processImageJob(event);
+console.log("Processing result:", JSON.stringify(result));

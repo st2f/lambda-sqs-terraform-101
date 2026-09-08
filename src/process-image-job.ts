@@ -9,11 +9,10 @@ export interface ImageJobResult {
   status: "accepted";
 }
 
-/**
- * The Lambda handler is the function AWS will call for each invocation.
- * Increment 1 calls it directly; no AWS services are involved yet.
- */
-export async function handler(event: ImageJobEvent): Promise<ImageJobResult> {
+/** Application behavior shared by delivery-specific Lambda handlers. */
+export async function processImageJob(
+  event: ImageJobEvent,
+): Promise<ImageJobResult> {
   console.log(
     JSON.stringify({
       message: "Image job received",

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { handler } from "../src/handler.js";
+import { processImageJob } from "../src/process-image-job.js";
 
-describe("handler", () => {
+describe("processImageJob", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -10,7 +10,7 @@ describe("handler", () => {
   it("logs the image job and returns a successful result", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    const result = await handler({
+    const result = await processImageJob({
       jobId: "job-123",
       imageId: "image-456",
       operation: "resize",
@@ -33,7 +33,7 @@ describe("handler", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await expect(
-      handler({
+      processImageJob({
         jobId: "FAIL",
         imageId: "image-456",
         operation: "resize",

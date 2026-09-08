@@ -1,5 +1,6 @@
 AGENTS.override.md
 priv/
+.vscode*
 
 node_modules/
 dist/
