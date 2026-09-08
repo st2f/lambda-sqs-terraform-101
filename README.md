@@ -27,7 +27,7 @@ and Terraform remain easy to inspect.
 - [5. Connect SQS to Lambda](#5-connect-sqs-to-lambda)
 - [6. Inspect an Actual SQS Lambda Event](#6-inspect-an-actual-sqs-lambda-event)
 - [7. Introduce a Processing Failure](#7-introduce-a-processing-failure)
-- 8\. Visibility Timeout Versus Lambda Timeout
+- [8. Visibility Timeout Versus Lambda Timeout](#8-visibility-timeout-versus-lambda-timeout)
 - 9\. Add a Dead-Letter Queue
 - 10\. Debug a Message in the DLQ
 - 11\. Redrive a Corrected Message Manually
@@ -837,3 +837,82 @@ Purging removes every message in the queue, including messages temporarily in
 flight, and AWS can take up to 60 seconds to complete it. The two approximate
 message counters should settle at `0`. A later increment will replace this
 manual cleanup with a dead-letter queue and a finite receive policy.
+
+## 8. Visibility Timeout Versus Lambda Timeout
+
+Make the timing relationship between Lambda and its SQS source explicit. The
+Lambda timeout limits how long one invocation may run. The queue visibility
+timeout controls how long a received message remains hidden while that attempt
+is in progress; it does not extend the Lambda invocation.
+
+The relevant settings are in `terraform/main.tf`. This increment configures a
+5-second Lambda timeout, no batching window, and derives the queue's 30-second
+visibility timeout from this relationship:
+
+```text
+visibility timeout >= 6 × Lambda timeout + batching window
+30 seconds        >= 6 × 5 seconds       + 0 seconds
+```
+
+AWS requires the function timeout to be no greater than the queue visibility
+timeout when an SQS event source mapping is created or updated. The 6× formula
+is AWS's stronger recommendation: it leaves time for Lambda to retry when an
+earlier attempt was throttled. It does not promise exactly six invocation
+attempts.
+
+Prerequisite: a deployed Lambda connected to its standard SQS source queue by
+an event source mapping. Run the commands from the repository root.
+
+### Prepare and inspect the timing change
+
+Build the current Lambda artifact, validate the configuration, and inspect a
+saved plan:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-8.tfplan
+terraform -chdir=terraform show increment-8.tfplan
+```
+
+Expect an in-place update of `aws_lambda_function.image_processor`, changing
+its timeout from 3 to 5 seconds. The SQS queue remains at 30 seconds, so deriving
+that value instead of writing the literal should not change the queue. The
+event source mapping's explicit zero-second batching window also matches its
+existing default. No resources should be added, replaced, or destroyed.
+
+After reviewing the plan, apply it:
+
+```bash
+terraform -chdir=terraform apply increment-8.tfplan
+```
+
+### Verify the deployed relationship
+
+Read each value from the AWS service that owns it:
+
+```bash
+aws lambda get-function-configuration \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --query '{Timeout:Timeout}'
+
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names VisibilityTimeout
+
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EventSourceMappings[].{BatchingWindow:MaximumBatchingWindowInSeconds}'
+```
+
+Expect `Timeout` to be `5`, `VisibilityTimeout` to be the string `"30"`, and
+`BatchingWindow` to be `0`. The visibility timeout is deliberately much longer
+than one normal invocation: a value merely equal to the function timeout would
+meet the creation constraint but leave no operational margin for throttling,
+network latency, or small timing variations.

@@ -1,6 +1,13 @@
 locals {
   function_name = "${var.project_name}-${var.environment}"
 
+  lambda_timeout_seconds      = 5
+  sqs_batching_window_seconds = 0
+  # AWS recommends six times the Lambda timeout, plus any batching window.
+  sqs_visibility_timeout_seconds = (
+    6 * local.lambda_timeout_seconds + local.sqs_batching_window_seconds
+  )
+
   common_tags = {
     Project     = var.project_name
     Environment = var.environment
@@ -53,7 +60,7 @@ resource "aws_lambda_function" "image_processor" {
   handler = "handler.handler"
 
   memory_size = 128
-  timeout     = 3
+  timeout     = local.lambda_timeout_seconds
 
   depends_on = [
     aws_cloudwatch_log_group.lambda,
@@ -64,7 +71,7 @@ resource "aws_lambda_function" "image_processor" {
 resource "aws_sqs_queue" "image_jobs" {
   name = "${local.function_name}-image-jobs"
 
-  visibility_timeout_seconds = 30
+  visibility_timeout_seconds = local.sqs_visibility_timeout_seconds
 }
 
 data "aws_iam_policy_document" "lambda_sqs" {
@@ -89,8 +96,9 @@ resource "aws_lambda_event_source_mapping" "image_jobs" {
   event_source_arn = aws_sqs_queue.image_jobs.arn
   function_name    = aws_lambda_function.image_processor.arn
 
-  batch_size = 1
-  enabled    = true
+  batch_size                         = 1
+  maximum_batching_window_in_seconds = local.sqs_batching_window_seconds
+  enabled                            = true
 
   depends_on = [aws_iam_role_policy.lambda_sqs]
 }
