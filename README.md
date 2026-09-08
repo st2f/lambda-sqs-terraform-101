@@ -25,7 +25,7 @@ and Terraform remain easy to inspect.
 - [3. Observe Lambda in AWS](#3-observe-lambda-in-aws)
 - [4. Add a Standard SQS Queue With Terraform](#4-add-a-standard-sqs-queue-with-terraform)
 - [5. Connect SQS to Lambda](#5-connect-sqs-to-lambda)
-- 6\. Inspect an Actual SQS Lambda Event
+- [6. Inspect an Actual SQS Lambda Event](#6-inspect-an-actual-sqs-lambda-event)
 - 7\. Introduce a Processing Failure
 - 8\. Visibility Timeout Versus Lambda Timeout
 - 9\. Add a Dead-Letter Queue
@@ -625,3 +625,67 @@ application-level interpretation was correct.
 Once connected, the poller continuously performs SQS receives, including when
 the queue is empty. This can incur SQS request charges, though the cost of this
 small learning setup should remain negligible.
+
+## 6. Inspect an Actual SQS Lambda Event
+
+Observe the difference between the **Lambda invocation event** (`Records` and
+SQS delivery metadata) and the **application message** (JSON text in `body`).
+
+`src/handler-sqs.ts` logs selected delivery fields, parses the complete body,
+and processes the image job. The body preview is limited to 200 characters;
+receipt handles and sender IDs are omitted. Use the invented job below.
+
+Prerequisite: a deployed SQS queue connected to Lambda with batch size 1.
+Run the commands from the repository root.
+
+### Prepare the deployment
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-6.tfplan
+terraform -chdir=terraform show increment-6.tfplan
+```
+
+The checks include a representative SQS fixture in
+`test/handler-sqs.test.ts`; it tests the handler, not SQS itself. The build
+bundles `handler-sqs.ts` into `dist/handler.js` for Terraform to package.
+Expect an in-place Lambda code update and changed hash output.
+
+### Send and observe
+
+After reviewing the plan, deploy and send one job:
+
+```bash
+terraform -chdir=terraform apply increment-6.tfplan
+
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"job-601","imageId":"image-456","operation":"resize"}'
+```
+
+Save the returned `MessageId`. Wait a few seconds, then inspect the logs:
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 5m
+```
+
+Repeat the log command if delivery logs have not appeared yet.
+
+| In the log                    | Expected observation                                                |
+| ----------------------------- | ------------------------------------------------------------------- |
+| `Records`                     | One SQS record.                                                     |
+| `messageId`                   | Matches the send response.                                          |
+| `body`                        | Your job as JSON text, with escaped quotes.                         |
+| `attributes`                  | Receive count (normally `"1"`) and timestamps, all strings.         |
+| `eventSource`                 | `aws:sqs`.                                                          |
+| `eventSourceARN`, `awsRegion` | Identify the source queue and region.                               |
+| `Image job received`          | Parsed `job-601`, `image-456`, and `resize` in the same invocation. |
+
+You sent only the body; AWS supplied the envelope. `JSON.parse` turns that
+body into the application job. Matching the send response's message ID to the
+logs confirms this distinction in an actual delivery.

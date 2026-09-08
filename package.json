@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "npm run build:lambda",
-    "build:lambda": "esbuild src/handler.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handler.js",
+    "build:lambda": "esbuild src/handler-sqs.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handler.js",
     "invoke": "node --import tsx src/invoke.ts",
+    "invoke:sqs": "node --import tsx src/invoke-sqs.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"
