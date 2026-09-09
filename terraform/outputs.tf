@@ -42,3 +42,18 @@ output "image_jobs_queue_name" {
   description = "Name of the standard image-jobs queue."
   value       = aws_sqs_queue.image_jobs.name
 }
+
+output "image_jobs_dead_letter_queue_url" {
+  description = "Regional HTTPS endpoint used to inspect failed image jobs."
+  value       = aws_sqs_queue.image_jobs_dead_letter.url
+}
+
+output "image_jobs_dead_letter_queue_arn" {
+  description = "ARN referenced by the source queue's redrive policy."
+  value       = aws_sqs_queue.image_jobs_dead_letter.arn
+}
+
+output "image_jobs_dead_letter_queue_name" {
+  description = "Name of the standard dead-letter queue for failed image jobs."
+  value       = aws_sqs_queue.image_jobs_dead_letter.name
+}

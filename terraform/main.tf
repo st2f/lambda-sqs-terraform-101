@@ -3,6 +3,8 @@ locals {
 
   lambda_timeout_seconds      = 5
   sqs_batching_window_seconds = 0
+  # Deliberately low for the DLQ exercise; choose this from operational needs in production.
+  sqs_max_receive_count = 3
   # AWS recommends six times the Lambda timeout, plus any batching window.
   sqs_visibility_timeout_seconds = (
     6 * local.lambda_timeout_seconds + local.sqs_batching_window_seconds
@@ -68,10 +70,22 @@ resource "aws_lambda_function" "image_processor" {
   ]
 }
 
+resource "aws_sqs_queue" "image_jobs_dead_letter" {
+  name = "${local.function_name}-image-jobs-dlq"
+
+  # Retain failed jobs longer than the source queue's four-day default.
+  message_retention_seconds = 14 * 24 * 60 * 60
+}
+
 resource "aws_sqs_queue" "image_jobs" {
   name = "${local.function_name}-image-jobs"
 
   visibility_timeout_seconds = local.sqs_visibility_timeout_seconds
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.image_jobs_dead_letter.arn
+    maxReceiveCount     = local.sqs_max_receive_count
+  })
 }
 
 data "aws_iam_policy_document" "lambda_sqs" {

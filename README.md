@@ -28,7 +28,7 @@ and Terraform remain easy to inspect.
 - [6. Inspect an Actual SQS Lambda Event](#6-inspect-an-actual-sqs-lambda-event)
 - [7. Introduce a Processing Failure](#7-introduce-a-processing-failure)
 - [8. Visibility Timeout Versus Lambda Timeout](#8-visibility-timeout-versus-lambda-timeout)
-- 9\. Add a Dead-Letter Queue
+- [9. Add a Dead-Letter Queue](#9-add-a-dead-letter-queue)
 - 10\. Debug a Message in the DLQ
 - 11\. Redrive a Corrected Message Manually
 - 12\. Process a Batch
@@ -916,3 +916,153 @@ Expect `Timeout` to be `5`, `VisibilityTimeout` to be the string `"30"`, and
 than one normal invocation: a value merely equal to the function timeout would
 meet the creation constraint but leave no operational margin for throttling,
 network latency, or small timing variations.
+
+## 9. Add a Dead-Letter Queue
+
+Bound the source queue's retry cycle by moving repeatedly failing messages to a
+dead-letter queue (DLQ). This is an SQS redrive policy: Lambda continues to
+report success or failure for each invocation, while SQS counts receives and
+moves a message after repeated unsuccessful deliveries.
+
+```text
+image-jobs source queue
+        │
+        │ maxReceiveCount = 3 in this lab
+        ▼
+image-jobs dead-letter queue
+```
+
+The source queue's `redrive_policy` names the DLQ ARN and sets
+`maxReceiveCount` to `3`. That value is intentionally low so the behavior can
+be observed quickly; it is not a production recommendation. In production,
+choose a value that gives transient failures enough opportunities to recover
+without delaying investigation of a genuinely bad message. The DLQ retains
+messages for 14 days, longer than the source queue's four-day default.
+
+For a standard queue, the original enqueue timestamp is retained after the
+move, which is why the DLQ should have the longer retention period.
+
+Relevant files:
+
+- `terraform/main.tf` creates `aws_sqs_queue.image_jobs_dead_letter` and adds
+  the redrive policy to `aws_sqs_queue.image_jobs`.
+- `terraform/outputs.tf` exposes the DLQ URL, ARN, and name for inspection.
+- `src/process-image-job.ts` provides the existing `jobId: "FAIL"` poison-job
+  behavior; no application-code change is required.
+
+Prerequisite: the Lambda, source queue, IAM policy, and enabled event source
+mapping from the earlier infrastructure must be deployed. Use a dedicated lab
+queue with no valuable messages, and run these commands from the repository
+root.
+
+### Prepare and inspect the change
+
+Run the local checks, build the deployment artifact, validate Terraform, and
+save the plan before applying it:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-9.tfplan
+terraform -chdir=terraform show increment-9.tfplan
+```
+
+Expect one new SQS queue, an in-place update of the source queue to add its
+redrive policy, and three new outputs. Because the IAM policy document refers
+to the changing source queue, Terraform may defer that data source until apply
+and conservatively show an in-place IAM policy update. Its permissions and
+source queue ARN remain unchanged; after recomputing the document, apply may
+report only the source queue as changed. No Lambda function or event source
+mapping change is expected. Before applying, answer these questions from the
+plan:
+
+| Question                                 | Expected answer                                                              |
+| ---------------------------------------- | ---------------------------------------------------------------------------- |
+| Which queue points to which?             | The existing `image_jobs` source queue points to `image_jobs_dead_letter`.   |
+| Where is `maxReceiveCount` configured?   | In the source queue's `redrive_policy`, via `local.sqs_max_receive_count`.   |
+| What ARN is referenced?                  | `aws_sqs_queue.image_jobs_dead_letter.arn`.                                  |
+| Does Lambda know directly about the DLQ? | No. Its event source mapping and IAM policy reference only the source queue. |
+
+After reviewing the complete plan, apply exactly that saved plan:
+
+```bash
+terraform -chdir=terraform apply increment-9.tfplan
+```
+
+Verify the source queue's live policy and compare its target ARN with the
+Terraform output:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names RedrivePolicy
+
+terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_arn
+```
+
+The JSON nested inside `RedrivePolicy` should contain that DLQ ARN and a
+`maxReceiveCount` of `3`.
+
+### Observe a poison message reach the DLQ
+
+Send one controlled failure and save the returned `MessageId`:
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"FAIL","imageId":"image-456","operation":"resize"}'
+```
+
+Follow the Lambda logs until the same SQS message ID has failed on successive
+invocations, then stop with Control-C:
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 1m \
+  --follow
+```
+
+The logged `ApproximateReceiveCount` should increase for the same message.
+Delivery is asynchronous and Lambda applies failure backoff, so the DLQ move
+need not happen at an exact wall-clock interval. Repeat these commands until
+the source has no messages and the DLQ has one available message:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages
+```
+
+Finally, receive the DLQ message with a zero-second visibility timeout to
+inspect it without deleting it:
+
+```bash
+aws sqs receive-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names All \
+  --message-attribute-names All \
+  --max-number-of-messages 1 \
+  --visibility-timeout 0 \
+  --wait-time-seconds 10
+```
+
+Expect the original poison-job body and its SQS system attributes. On the first
+manual inspection after three Lambda delivery attempts,
+`ApproximateReceiveCount` is `4`: the `receive-message` inspection is itself
+the fourth receive. Repeating it increases the count again. A receive does not
+delete the message; omitting `delete-message` leaves it in the DLQ for the next
+debugging increment. The DLQ belongs conceptually to SQS because the source
+queue's receive counter and redrive policy control the move. It is not a Lambda
+exception handler, and Lambda has no direct permission or mapping for the DLQ.
