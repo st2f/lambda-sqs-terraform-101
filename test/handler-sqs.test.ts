@@ -94,8 +94,8 @@ describe("SQS handler", () => {
     },
   );
 
-  it("fails a job marked for the observation exercise", async () => {
-    // Given an SQS delivery containing the exercise's failure marker.
+  it("accepts the job preserved by the completed failure exercise", async () => {
+    // Given the same body as the message waiting in the DLQ
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const event = eventWithBody(
       JSON.stringify({
@@ -105,13 +105,11 @@ describe("SQS handler", () => {
       }),
     );
 
-    // When the Lambda handles the delivery
-    const result = handler(event);
+    // When the corrected Lambda handles the replayed delivery
+    const result = await handler(event);
 
-    // Then it exposes the intentional failure for retry observation
-    await expect(result).rejects.toThrow(
-      "Intentional failure for observation exercise",
-    );
+    // Then it accepts the job instead of repeating the old failure
+    expect(result).toEqual({ jobId: "FAIL", status: "accepted" });
   });
 
   it("rejects a delivery containing more than one SQS record", async () => {

@@ -22,10 +22,6 @@ export async function processImageJob(
     }),
   );
 
-  if (event.jobId === "FAIL") {
-    throw new Error("Intentional failure for observation exercise");
-  }
-
   return {
     jobId: event.jobId,
     status: "accepted",

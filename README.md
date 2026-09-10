@@ -31,7 +31,7 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 Documentation: [docs/02-failure-recovery.md](docs/02-failure-recovery.md)
 
 10. [Debug a Message in the DLQ](docs/02-failure-recovery.md#10-debug-a-message-in-the-dlq)
-11. Redrive a Corrected Message Manually
+11. [Redrive a Corrected Message Manually](docs/02-failure-recovery.md#11-redrive-a-corrected-message-manually)
 
 ### Planned sections
 

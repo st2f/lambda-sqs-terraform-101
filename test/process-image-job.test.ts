@@ -29,17 +29,16 @@ describe("processImageJob", () => {
     });
   });
 
-  it("throws for the intentional failure event", async () => {
+  it("accepts the job ID used by the completed failure exercise", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    await expect(
-      processImageJob({
-        jobId: "FAIL",
-        imageId: "image-456",
-        operation: "resize",
-      }),
-    ).rejects.toThrow("Intentional failure for observation exercise");
+    const result = await processImageJob({
+      jobId: "FAIL",
+      imageId: "image-456",
+      operation: "resize",
+    });
 
+    expect(result).toEqual({ jobId: "FAIL", status: "accepted" });
     expect(log).toHaveBeenCalledOnce();
     expect(JSON.parse(String(log.mock.calls[0][0]))).toEqual({
       message: "Image job received",

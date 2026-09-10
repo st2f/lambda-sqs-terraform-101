@@ -170,3 +170,183 @@ Use this order to avoid changing code before proving which boundary failed:
     verify `DeadLetterQueueSourceArn`.
 12. **What do CloudWatch logs show for the matching message ID/job ID?** Trace
     message ID → request ID → parsed job → exact exception.
+
+## 11. Redrive a Corrected Message Manually
+
+Deploy a corrected consumer, then deliberately copy the preserved DLQ message
+body back to the source queue and observe successful processing. This is a
+manual replay that demonstrates the redrive concept; it does not use SQS's
+managed `StartMessageMoveTask` operation.
+
+The temporary `jobId === "FAIL"` branch has been removed from
+`src/process-image-job.ts`. Its tests now prove that the same job is accepted.
+After this version is deployed, the Increment 7/9 failure experiment cannot be
+repeated with that marker unless the deliberate failure branch is restored and
+deployed again.
+
+Prerequisites:
+
+- The Lambda, source queue, DLQ, IAM policy, and event source mapping are
+  deployed.
+- The diagnosed `FAIL` message from Increment 10 remains in the DLQ.
+- Your AWS CLI credentials can deploy Lambda through Terraform and read and
+  write both queues.
+- Run all commands from the repository root.
+
+Relevant files:
+
+- `src/process-image-job.ts` contains the corrected application behavior.
+- `test/process-image-job.test.ts` and `test/handler-sqs.test.ts` cover the
+  previously failing job at the application and SQS-adapter boundaries.
+- `terraform/main.tf` still deploys `dist/handler.js`; no infrastructure
+  resource definition changes in this increment.
+
+### Build and deploy the corrected handler
+
+Run the local checks, rebuild the Lambda artifact, and inspect a saved plan:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-11.tfplan
+terraform -chdir=terraform show increment-11.tfplan
+```
+
+Expect one in-place update of `aws_lambda_function.image_processor` because
+the deployment ZIP hash changed. The queues, redrive policy, IAM policy, and
+event source mapping should not change. After reviewing the complete plan,
+deploy exactly that artifact:
+
+```bash
+terraform -chdir=terraform apply increment-11.tfplan
+```
+
+Changing the handler does not make SQS move existing messages out of the DLQ.
+The message remains isolated until an operator explicitly chooses to replay or
+delete it.
+
+### Copy the preserved body to the source queue
+
+Read the body without deleting or temporarily hiding the original message:
+
+```bash
+DLQ_MESSAGE_BODY="$(
+  aws sqs receive-message \
+    --region "$(terraform -chdir=terraform output -raw aws_region)" \
+    --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+    --max-number-of-messages 1 \
+    --visibility-timeout 0 \
+    --wait-time-seconds 10 \
+    --query 'Messages[0].Body' \
+    --output text
+)"
+
+printf '%s\n' "$DLQ_MESSAGE_BODY"
+```
+
+Expect the original JSON body with `jobId: "FAIL"`. Publish that body as a new
+message on the source queue:
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body "$DLQ_MESSAGE_BODY"
+```
+
+Copy the returned ID. It differs from the original DLQ message ID because this
+manual procedure creates a new SQS message containing the same application
+job:
+
+```bash
+REPLAY_MESSAGE_ID="replace-with-the-new-message-id"
+```
+
+### Verify successful processing
+
+Find the new delivery and copy its Lambda request ID:
+
+```bash
+aws logs filter-log-events \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --log-group-name "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --filter-pattern "\"${REPLAY_MESSAGE_ID}\"" \
+  --query 'events[].message' \
+  --output text
+
+REPLAY_REQUEST_ID="replace-with-the-request-id-from-the-result"
+```
+
+Then inspect that complete invocation:
+
+```bash
+aws logs filter-log-events \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --log-group-name "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --filter-pattern "\"${REPLAY_REQUEST_ID}\"" \
+  --query 'events[].message' \
+  --output text
+```
+
+Expect `Image job received` for `jobId: "FAIL"`, followed by normal `END` and
+`REPORT` records with no invocation error. Confirm that the replayed copy left
+the source queue while the original remains in the DLQ:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages
+```
+
+The first response reports the source queue: both its visible and in-flight
+counters should settle at `0`. The second response reports the DLQ: its visible
+count should still be `1` because it contains the original. Successful
+processing of the source-queue copy does not acknowledge or delete a different
+physical SQS message in the DLQ.
+
+### Remove the original job from the DLQ
+
+Only after verifying success, receive the original once more with a nonzero
+visibility timeout and save its current receipt handle:
+
+```bash
+DLQ_RECEIPT_HANDLE="$(
+  aws sqs receive-message \
+    --region "$(terraform -chdir=terraform output -raw aws_region)" \
+    --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+    --max-number-of-messages 1 \
+    --visibility-timeout 30 \
+    --wait-time-seconds 10 \
+    --query 'Messages[0].ReceiptHandle' \
+    --output text
+)"
+
+aws sqs delete-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --receipt-handle "$DLQ_RECEIPT_HANDLE"
+```
+
+Verify that the DLQ's approximate visible and in-flight counts settle at `0`:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+The safe ordering is copy, verify, then delete. Deleting first risks losing the
+job if publishing fails. Copying first can still produce duplicates if the
+operator loses the send result and retries, or if processing succeeds but its
+confirmation is missed. A production consumer should therefore make repeated
+processing safe using an application identity such as `jobId`; a newly
+assigned SQS message ID cannot identify a replay of the same logical job.
