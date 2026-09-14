@@ -28,14 +28,21 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 
 ### 02 Failure Recovery
 
-Documentation: [docs/02-failure-recovery.md](docs/02-failure-recovery.md)
+- Documentation: [docs/02-failure-recovery.md](docs/02-failure-recovery.md)
+- Code snapshot: [02-failure-recovery](https://github.com/st2f/lambda-sqs-terraform-101/tree/02-failure-recovery)
 
 10. [Debug a Message in the DLQ](docs/02-failure-recovery.md#10-debug-a-message-in-the-dlq)
 11. [Redrive a Corrected Message Manually](docs/02-failure-recovery.md#11-redrive-a-corrected-message-manually)
 
+### 03 Batch Processing
+
+- Documentation: [docs/03-batch-processing.md](docs/03-batch-processing.md)
+
+12. [Process a Batch](docs/03-batch-processing.md#12-process-a-batch)
+
 ### Planned sections
 
-- Increments 12–14: batch processing and partial batch responses
+- Increments 13–14: whole-batch failure and partial batch responses
 - Increments 15–20: failure diagnosis and observability
 - Increments 21–24: FIFO behavior and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review

@@ -7,6 +7,18 @@ function eventWithBody(body: string) {
   return { Records: [{ ...sqsEvent.Records[0], body }] };
 }
 
+function record(messageId: string, jobId: string) {
+  return {
+    ...sqsEvent.Records[0],
+    messageId,
+    body: JSON.stringify({
+      jobId,
+      imageId: "image-456",
+      operation: "resize",
+    }),
+  };
+}
+
 describe("SQS handler", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -20,10 +32,10 @@ describe("SQS handler", () => {
     const result = await handler(sqsEvent);
 
     // Then it accepts the application job from the message body
-    expect(result).toEqual({
+    expect(result).toEqual([{
       jobId: "job-601",
       status: "accepted",
-    });
+    }]);
 
     // And it records the useful delivery context without logging other fields
     expect(log).toHaveBeenCalledTimes(2);
@@ -68,10 +80,10 @@ describe("SQS handler", () => {
     const result = await handler(eventWithBody(body));
 
     // Then it processes the complete body successfully
-    expect(result).toEqual({
+    expect(result).toEqual([{
       jobId: "job-long",
       status: "accepted",
-    });
+    }]);
 
     // And it limits the body included in the delivery log
     expect(JSON.parse(String(log.mock.calls[0][0])).Records[0]).toMatchObject({
@@ -109,17 +121,53 @@ describe("SQS handler", () => {
     const result = await handler(event);
 
     // Then it accepts the job instead of repeating the old failure
-    expect(result).toEqual({ jobId: "FAIL", status: "accepted" });
+    expect(result).toEqual([{ jobId: "FAIL", status: "accepted" }]);
   });
 
-  it("rejects a delivery containing more than one SQS record", async () => {
-    // Given a delivery that violates this increment's one-record contract
-    const event = { Records: [sqsEvent.Records[0], sqsEvent.Records[0]] };
+  it("processes every record in a successful batch", async () => {
+    // Given three valid jobs delivered to one Lambda invocation
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const event = {
+      Records: [
+        record("message-1", "job-1201"),
+        record("message-2", "job-1202"),
+        record("message-3", "job-1203"),
+      ],
+    };
 
-    // When the Lambda handles the delivery
+    // When the Lambda handles the batch
+    const result = await handler(event);
+
+    // Then every job is processed explicitly in record order
+    expect(result).toEqual([
+      { jobId: "job-1201", status: "accepted" },
+      { jobId: "job-1202", status: "accepted" },
+      { jobId: "job-1203", status: "accepted" },
+    ]);
+    expect(log).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(String(log.mock.calls[0][0])).Records).toHaveLength(3);
+    expect(log.mock.calls.slice(1).map(([entry]) => JSON.parse(String(entry)).jobId))
+      .toEqual(["job-1201", "job-1202", "job-1203"]);
+  });
+
+  it("rejects the whole invocation when one record fails", async () => {
+    // Given a valid record, a malformed record, and another valid record
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const event = {
+      Records: [
+        record("message-1", "job-before-failure"),
+        { ...sqsEvent.Records[0], messageId: "message-2", body: "{broken" },
+        record("message-3", "job-after-failure"),
+      ],
+    };
+
+    // When the Lambda handles the batch using default failure behavior
     const result = handler(event);
 
-    // Then it rejects the whole delivery rather than acknowledging unseen work
-    await expect(result).rejects.toThrow("exactly one SQS record");
+    // Then the invocation rejects after processing the first record
+    await expect(result).rejects.toThrow();
+    expect(log).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(log.mock.calls[1][0])).jobId)
+      .toBe("job-before-failure");
   });
 });

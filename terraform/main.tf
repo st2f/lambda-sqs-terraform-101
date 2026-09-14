@@ -2,7 +2,8 @@ locals {
   function_name = "${var.project_name}-${var.environment}"
 
   lambda_timeout_seconds      = 5
-  sqs_batching_window_seconds = 0
+  sqs_batch_size              = 3
+  sqs_batching_window_seconds = 5
   # Deliberately low for the DLQ exercise; choose this from operational needs in production.
   sqs_max_receive_count = 3
   # AWS recommends six times the Lambda timeout, plus any batching window.
@@ -110,7 +111,7 @@ resource "aws_lambda_event_source_mapping" "image_jobs" {
   event_source_arn = aws_sqs_queue.image_jobs.arn
   function_name    = aws_lambda_function.image_processor.arn
 
-  batch_size                         = 1
+  batch_size                         = local.sqs_batch_size
   maximum_batching_window_in_seconds = local.sqs_batching_window_seconds
   enabled                            = true
 
