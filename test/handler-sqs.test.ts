@@ -151,23 +151,32 @@ describe("SQS handler", () => {
   });
 
   it("rejects the whole invocation when one record fails", async () => {
-    // Given a valid record, a malformed record, and another valid record
+    // Given GOOD-1, GOOD-2, an invalid job, and GOOD-3 in one delivery
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const event = {
       Records: [
-        record("message-1", "job-before-failure"),
-        { ...sqsEvent.Records[0], messageId: "message-2", body: "{broken" },
-        record("message-3", "job-after-failure"),
+        record("message-1", "GOOD-1"),
+        record("message-2", "GOOD-2"),
+        {
+          ...sqsEvent.Records[0],
+          messageId: "message-3",
+          body: JSON.stringify({
+            jobId: "FAIL",
+            imageId: "image-456",
+            operation: "unsupported",
+          }),
+        },
+        record("message-4", "GOOD-3"),
       ],
     };
 
     // When the Lambda handles the batch using default failure behavior
     const result = handler(event);
 
-    // Then the invocation rejects after processing the first record
-    await expect(result).rejects.toThrow();
-    expect(log).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(String(log.mock.calls[1][0])).jobId)
-      .toBe("job-before-failure");
+    // Then the invocation fails after GOOD-1 and GOOD-2 have done their work
+    await expect(result).rejects.toThrow("Invalid image job");
+    expect(log).toHaveBeenCalledTimes(3);
+    expect(log.mock.calls.slice(1).map(([entry]) => JSON.parse(String(entry)).jobId))
+      .toEqual(["GOOD-1", "GOOD-2"]);
   });
 });

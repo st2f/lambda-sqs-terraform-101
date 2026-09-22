@@ -2,7 +2,7 @@ locals {
   function_name = "${var.project_name}-${var.environment}"
 
   lambda_timeout_seconds      = 5
-  sqs_batch_size              = 3
+  sqs_batch_size              = 4
   sqs_batching_window_seconds = 5
   # Deliberately low for the DLQ exercise; choose this from operational needs in production.
   sqs_max_receive_count = 3
