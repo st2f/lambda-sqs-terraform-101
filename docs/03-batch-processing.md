@@ -283,3 +283,134 @@ aws sqs get-queue-attributes \
 ```
 
 Leave the messages in place until you have finished comparing their log histories and receive counts. Increment 14 will change the acknowledgement contract so successfully processed records can be removed independently.
+
+## 14. Add Partial Batch Responses
+
+This experiment repeats the same four-job batch after changing the contract between the handler and the event source mapping:
+
+```text
+GOOD-1 ─→ processed ─┐
+GOOD-2 ─→ processed ─┤
+FAIL   ─→ reported  ─┼─→ { batchItemFailures: [{ itemIdentifier: FAIL message ID }] }
+GOOD-3 ─→ processed ─┘
+```
+
+The Lambda invocation now completes successfully even though one record failed. Its return value tells the event source mapping which individual SQS message must become visible again. The other messages can be acknowledged and deleted.
+
+Prerequisites: same as in previous step.
+
+Relevant files:
+
+- `src/handler-sqs.ts` catches each record's error, logs it, continues processing, and returns failed message IDs in `batchItemFailures`.
+- `test/handler-sqs.test.ts` verifies that `GOOD-3` is processed after `FAIL` and only `FAIL` is reported for retry.
+- `terraform/main.tf` enables `ReportBatchItemFailures` on the event source mapping.
+
+### Build and inspect the change
+
+Run the local checks, build the deployment artifact, and inspect a saved plan:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-14.tfplan
+terraform -chdir=terraform show increment-14.tfplan
+```
+
+Expect in-place updates to the Lambda code and event source mapping. The mapping gains `ReportBatchItemFailures` in `FunctionResponseTypes`; its batch size and batching window remain unchanged. No queue, Lambda, IAM, or DLQ resource should be replaced. After reviewing the complete plan, apply exactly that artifact:
+
+```bash
+terraform -chdir=terraform apply increment-14.tfplan
+```
+
+Confirm both sides of the deployed contract before publishing messages:
+
+```bash
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EventSourceMappings[].{State:State,BatchSize:BatchSize,Window:MaximumBatchingWindowInSeconds,ResponseTypes:FunctionResponseTypes}'
+```
+
+Expect one enabled mapping with batch size `4`, window `5`, and `ResponseTypes` containing `ReportBatchItemFailures`.
+
+The configuration and handler response are both necessary. If the handler returns `batchItemFailures` without enabling `ReportBatchItemFailures`, the mapping ignores that structure and treats the successful invocation as a fully successful batch. If the mapping is enabled but the handler throws, the invocation still fails as a whole and every message in that delivery becomes eligible for retry.
+
+### Repeat the four-job delivery
+
+Send the same logical jobs as Increment 13:
+
+```bash
+aws sqs send-message-batch \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --entries '[
+    {"Id":"good-1","MessageBody":"{\"jobId\":\"GOOD-1\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"},
+    {"Id":"good-2","MessageBody":"{\"jobId\":\"GOOD-2\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"},
+    {"Id":"fail","MessageBody":"{\"jobId\":\"FAIL\",\"imageId\":\"image-456\",\"operation\":\"unsupported\"}"},
+    {"Id":"good-3","MessageBody":"{\"jobId\":\"GOOD-3\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"}
+  ]'
+```
+
+Inspect the first invocation:
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 5m
+```
+
+Confirm the actual delivery from the `SQS event received` entry because a batch size of four is a maximum and a standard queue does not guarantee order. When all four arrive together, expect an `Image job received` entry for every valid job, including valid jobs after `FAIL` in the delivery order. Expect one `SQS record failed` error log containing `FAIL`'s SQS message ID. Unlike Increment 13, the invocation has normal `END` and `REPORT` entries without a platform `Invoke Error`: the record-level error was converted into a successful partial batch response rather than thrown from the handler.
+
+### Observe only the failed message retry
+
+After at least the 35-second visibility timeout, inspect the logs again:
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 10m
+```
+
+Example (possible variation)
+
+| Receive | Delivered records | Application processing | Result |
+| --- | --- | --- | --- |
+| 1a | `GOOD-1` | `GOOD-1` | Success; empty failure list; deleted |
+| 1b | `FAIL`, `GOOD-3`, `GOOD-2` | `GOOD-3`, `GOOD-2` | Success; only `FAIL` reported; valid messages deleted |
+| 2 | `FAIL` | None | Success; `FAIL` reported again |
+| 3 | `FAIL` | None | Success; `FAIL` reported again and eventually moved to the DLQ |
+
+In this example, Lambda split the messages' first delivery across two concurrent invocations even though the configured maximum batch size was four. The second invocation logged a record-level `ERROR` for `FAIL`, continued with `GOOD-3` and `GOOD-2`, and ended normally without a platform `Invoke Error`. On later receives, only the same `FAIL` message ID returned, with `ApproximateReceiveCount` increasing from `1` to `2` and then `3`.
+
+Expect a later envelope containing only `FAIL`, with the same `messageId` and an `ApproximateReceiveCount` greater than `1`. The valid message IDs should not appear in a retry caused by this record-level failure. Because `FAIL` remains a poison message and `maxReceiveCount = 3`, it can eventually move to the DLQ.
+
+Verify that the source queue has settled and inspect the DLQ:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+The expected final state is an empty source queue and one visible `FAIL` message in the DLQ. Queue counts are approximate and can lag briefly.
+
+### Compare the acknowledgement boundaries
+
+| Behavior | Increment 13: thrown error | Increment 14: partial response |
+| --- | --- | --- |
+| Lambda invocation | Failed | Successful |
+| Valid records before `FAIL` | Work may run; message is retried | Work runs; message is acknowledged |
+| Valid records after `FAIL` | Not reached by the sequential loop | Processed and acknowledged |
+| `FAIL` | Retried | Retried |
+| Required mapping response type | None | `ReportBatchItemFailures` |
+
+Partial batch responses remove the deterministic whole-batch duplicate path, but they do not change SQS's at-least-once delivery model. A message can still be delivered more than once, so real side effects should still be idempotent. This increment deliberately keeps the implementation explicit and does not introduce AWS Lambda Powertools or an idempotency store.

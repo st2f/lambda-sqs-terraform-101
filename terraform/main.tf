@@ -113,6 +113,7 @@ resource "aws_lambda_event_source_mapping" "image_jobs" {
 
   batch_size                         = local.sqs_batch_size
   maximum_batching_window_in_seconds = local.sqs_batching_window_seconds
+  function_response_types            = ["ReportBatchItemFailures"]
   enabled                            = true
 
   depends_on = [aws_iam_role_policy.lambda_sqs]

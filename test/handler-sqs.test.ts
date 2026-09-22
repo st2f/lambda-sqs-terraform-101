@@ -31,11 +31,8 @@ describe("SQS handler", () => {
     // When the Lambda handles the delivery
     const result = await handler(sqsEvent);
 
-    // Then it accepts the application job from the message body
-    expect(result).toEqual([{
-      jobId: "job-601",
-      status: "accepted",
-    }]);
+    // Then it reports no failed SQS records
+    expect(result).toEqual({ batchItemFailures: [] });
 
     // And it records the useful delivery context without logging other fields
     expect(log).toHaveBeenCalledTimes(2);
@@ -80,10 +77,7 @@ describe("SQS handler", () => {
     const result = await handler(eventWithBody(body));
 
     // Then it processes the complete body successfully
-    expect(result).toEqual([{
-      jobId: "job-long",
-      status: "accepted",
-    }]);
+    expect(result).toEqual({ batchItemFailures: [] });
 
     // And it limits the body included in the delivery log
     expect(JSON.parse(String(log.mock.calls[0][0])).Records[0]).toMatchObject({
@@ -93,16 +87,24 @@ describe("SQS handler", () => {
   });
 
   it.each(["{broken", "null", '{"jobId":42}'])(
-    "rejects an invalid SQS message body: %s",
+    "reports an invalid SQS message body: %s",
     async (body) => {
       // Given an SQS delivery whose body is not a valid image job
       vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
       // When the Lambda handles the delivery
-      const result = handler(eventWithBody(body));
+      const result = await handler(eventWithBody(body));
 
-      // Then it rejects the message so SQS can apply its retry policy
-      await expect(result).rejects.toThrow();
+      // Then it identifies only that message for retry and records the failure
+      expect(result).toEqual({
+        batchItemFailures: [{ itemIdentifier: sqsEvent.Records[0].messageId }],
+      });
+      expect(error).toHaveBeenCalledOnce();
+      expect(JSON.parse(String(error.mock.calls[0][0]))).toMatchObject({
+        message: "SQS record failed",
+        messageId: sqsEvent.Records[0].messageId,
+      });
     },
   );
 
@@ -120,8 +122,8 @@ describe("SQS handler", () => {
     // When the corrected Lambda handles the replayed delivery
     const result = await handler(event);
 
-    // Then it accepts the job instead of repeating the old failure
-    expect(result).toEqual([{ jobId: "FAIL", status: "accepted" }]);
+    // Then it accepts the job instead of reporting it for retry
+    expect(result).toEqual({ batchItemFailures: [] });
   });
 
   it("processes every record in a successful batch", async () => {
@@ -138,21 +140,18 @@ describe("SQS handler", () => {
     // When the Lambda handles the batch
     const result = await handler(event);
 
-    // Then every job is processed explicitly in record order
-    expect(result).toEqual([
-      { jobId: "job-1201", status: "accepted" },
-      { jobId: "job-1202", status: "accepted" },
-      { jobId: "job-1203", status: "accepted" },
-    ]);
+    // Then every job is processed explicitly and none is reported for retry
+    expect(result).toEqual({ batchItemFailures: [] });
     expect(log).toHaveBeenCalledTimes(4);
     expect(JSON.parse(String(log.mock.calls[0][0])).Records).toHaveLength(3);
     expect(log.mock.calls.slice(1).map(([entry]) => JSON.parse(String(entry)).jobId))
       .toEqual(["job-1201", "job-1202", "job-1203"]);
   });
 
-  it("rejects the whole invocation when one record fails", async () => {
+  it("reports one failed record and continues processing the batch", async () => {
     // Given GOOD-1, GOOD-2, an invalid job, and GOOD-3 in one delivery
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const event = {
       Records: [
         record("message-1", "GOOD-1"),
@@ -170,13 +169,22 @@ describe("SQS handler", () => {
       ],
     };
 
-    // When the Lambda handles the batch using default failure behavior
-    const result = handler(event);
+    // When the Lambda handles the batch using partial batch responses
+    const result = await handler(event);
 
-    // Then the invocation fails after GOOD-1 and GOOD-2 have done their work
-    await expect(result).rejects.toThrow("Invalid image job");
-    expect(log).toHaveBeenCalledTimes(3);
+    // Then only FAIL is reported, and processing continues with GOOD-3
+    expect(result).toEqual({
+      batchItemFailures: [{ itemIdentifier: "message-3" }],
+    });
+    expect(log).toHaveBeenCalledTimes(4);
     expect(log.mock.calls.slice(1).map(([entry]) => JSON.parse(String(entry)).jobId))
-      .toEqual(["GOOD-1", "GOOD-2"]);
+      .toEqual(["GOOD-1", "GOOD-2", "GOOD-3"]);
+    expect(error).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(error.mock.calls[0][0]))).toEqual({
+      message: "SQS record failed",
+      messageId: "message-3",
+      errorName: "Error",
+      errorMessage: "Invalid image job",
+    });
   });
 });

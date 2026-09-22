@@ -40,10 +40,10 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 
 12. [Process a Batch](docs/03-batch-processing.md#12-process-a-batch)
 13. [Understand Whole-Batch Failure](docs/03-batch-processing.md#13-understand-whole-batch-failure)
+14. [Add Partial Batch Responses](docs/03-batch-processing.md#14-add-partial-batch-responses)
 
 ### Planned sections
 
-- Increment 14: partial batch responses
 - Increments 15–20: failure diagnosis and observability
 - Increments 21–24: FIFO behavior and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review

@@ -384,8 +384,7 @@ Configure deliberately short but safe values for learning.
 
 Inspect:
 
-Lambda timeout
-SQS visibility timeout
+Lambda timeout SQS visibility timeout
 
 Explain why these values are related.
 
@@ -631,13 +630,13 @@ For each:
 6. observe
 7. compare prediction with reality
 
-Create a table in NOTES.md:
+Create a table:
 
 ```text
 Terraform change
 → AWS resource affected
 → runtime consequence
-→ how I verified it
+→ how to verify
 ```
 
 This increment is particularly important.
@@ -770,15 +769,13 @@ Use the AWS console and/or CLI to understand what each metric tells you.
 
 Given a scenario such as:
 
-queue depth increasing
-Lambda invocation count = 0
+queue depth increasing Lambda invocation count = 0
 
 explain likely categories of failure.
 
 Given:
 
-Lambda errors increasing
-same messages repeatedly received
+Lambda errors increasing same messages repeatedly received
 
 explain likely categories of failure.
 
@@ -830,8 +827,7 @@ Observe ordering.
 
 Then send messages using:
 
-customer-1
-customer-2
+customer-1 customer-2
 
 Explain:
 
@@ -931,10 +927,7 @@ Pick the source queue and event source mapping.
 
 Compare:
 
-Terraform configuration
-Terraform state
-AWS resource configuration
-runtime observations
+Terraform configuration Terraform state AWS resource configuration runtime observations
 
 Explain why passing:
 
@@ -1112,13 +1105,7 @@ Review it manually.
 
 For every changed block answer:
 
-What AWS resource changes?
-Does anything get replaced?
-What changes at runtime?
-What failure mode could this introduce?
-How would I test it?
-How would I observe it?
-How would I roll it back?
+What AWS resource changes? Does anything get replaced? What changes at runtime? What failure mode could this introduce? How would I test it? How would I observe it? How would I roll it back?
 
 Then compare my review with Codex’s analysis.
 

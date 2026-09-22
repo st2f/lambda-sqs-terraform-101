@@ -20,10 +20,16 @@ export interface SqsEvent {
   }>;
 }
 
+export interface SqsBatchResponse {
+  batchItemFailures: Array<{
+    itemIdentifier: string;
+  }>;
+}
+
 /** Inspect an SQS delivery envelope and process each image job explicitly. */
 export async function handler(
   event: ImageJobEvent | SqsEvent,
-): Promise<ImageJobResult | ImageJobResult[]> {
+): Promise<ImageJobResult | SqsBatchResponse> {
   if (!("Records" in event)) {
     return processImageJob(event);
   }
@@ -47,25 +53,35 @@ export async function handler(
     })),
   }));
 
-  const results: ImageJobResult[] = [];
+  const batchItemFailures: SqsBatchResponse["batchItemFailures"] = [];
 
   for (const record of event.Records) {
-    const job: unknown = JSON.parse(record.body);
-    if (
-      typeof job !== "object" || job === null ||
-      !("jobId" in job) || typeof job.jobId !== "string" ||
-      !("imageId" in job) || typeof job.imageId !== "string" ||
-      !("operation" in job) || job.operation !== "resize"
-    ) {
-      throw new Error("Invalid image job");
-    }
+    try {
+      const job: unknown = JSON.parse(record.body);
+      if (
+        typeof job !== "object" || job === null ||
+        !("jobId" in job) || typeof job.jobId !== "string" ||
+        !("imageId" in job) || typeof job.imageId !== "string" ||
+        !("operation" in job) || job.operation !== "resize"
+      ) {
+        throw new Error("Invalid image job");
+      }
 
-    results.push(await processImageJob({
-      jobId: job.jobId,
-      imageId: job.imageId,
-      operation: job.operation,
-    }));
+      await processImageJob({
+        jobId: job.jobId,
+        imageId: job.imageId,
+        operation: job.operation,
+      });
+    } catch (error) {
+      console.error(JSON.stringify({
+        message: "SQS record failed",
+        messageId: record.messageId,
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }));
+      batchItemFailures.push({ itemIdentifier: record.messageId });
+    }
   }
 
-  return results;
+  return { batchItemFailures };
 }
