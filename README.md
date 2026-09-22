@@ -42,9 +42,15 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 13. [Understand Whole-Batch Failure](docs/03-batch-processing.md#13-understand-whole-batch-failure)
 14. [Add Partial Batch Responses](docs/03-batch-processing.md#14-add-partial-batch-responses)
 
+### 04 Failure Diagnosis and Observability
+
+- Documentation: [docs/04-failure-diagnosis.md](docs/04-failure-diagnosis.md)
+
+15. [Terraform Change → Runtime Consequence](docs/04-failure-diagnosis.md#15-terraform-change--runtime-consequence)
+
 ### Planned sections
 
-- Increments 15–20: failure diagnosis and observability
+- Increments 16–20: failure diagnosis and observability
 - Increments 21–24: FIFO behavior and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review
 - Increments 31–32: optional tooling
