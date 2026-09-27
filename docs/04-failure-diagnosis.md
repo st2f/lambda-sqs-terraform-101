@@ -108,3 +108,165 @@ aws sqs get-queue-attributes \
 ```
 
 Expect both job IDs in `Image job received` entries and, after processing settles, zero visible and zero in-flight source messages. The jobs may arrive in one batch or separate invocations. A disabled mapping explains the earlier lack of invocations; the handler could only run after Lambda resumed polling the queue.
+
+## 17. Break IAM Deliberately
+
+Remove only `sqs:ReceiveMessage` from the Lambda execution role's queue policy. This permission lets the Lambda event source mapping poll SQS. Send one valid job, inspect where processing stops, then restore the permission so the waiting job can run.
+
+Prerequisites:
+
+- The Lambda, source queue, DLQ, execution role with its inline SQS policy, and event source mapping in `terraform/main.tf` are deployed. The mapping is enabled and the source queue is empty.
+- No other consumer or producer uses the source queue during this experiment. Leave existing DLQ messages untouched.
+- AWS CLI credentials can apply Terraform, send SQS messages, inspect IAM policies and the mapping, read queue attributes, and read Lambda logs.
+- Run commands from the repository root. Terraform is initialized in `terraform/`.
+
+Relevant files:
+
+- `terraform/variables.tf` defines `grant_sqs_receive_message`, which defaults to `true`.
+- `terraform/main.tf` grants the execution role `sqs:DeleteMessage` and `sqs:GetQueueAttributes`, and includes `sqs:ReceiveMessage` only while the variable is true. The deployed handler is `dist/handler.js`, built from `src/handler-sqs.ts`.
+
+### Remove the receive permission
+
+Run local checks, build the existing handler, and review a saved plan:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -var='grant_sqs_receive_message=false' -out=increment-17-deny.tfplan
+terraform -chdir=terraform show increment-17-deny.tfplan
+```
+
+The local checks should pass. The saved plan should update `aws_iam_role_policy.lambda_sqs` in place, removing only `sqs:ReceiveMessage`; it should leave the queue, Lambda code, and mapping configuration alone.
+
+```bash
+terraform -chdir=terraform apply increment-17-deny.tfplan
+sleep 120
+```
+
+The apply should report one changed resource. The wait should allow IAM policy to propagate.
+
+```bash
+aws iam get-role-policy \
+  --role-name "$(terraform -chdir=terraform output -raw lambda_function_name)-execution-role" \
+  --policy-name "$(terraform -chdir=terraform output -raw lambda_function_name)-sqs-consumer" \
+  --query 'PolicyDocument.Statement[].Action'
+```
+
+The action list should contain `sqs:DeleteMessage` and `sqs:GetQueueAttributes`, but no `sqs:ReceiveMessage`.
+
+```bash
+aws iam simulate-principal-policy \
+  --policy-source-arn "$(terraform -chdir=terraform output -raw lambda_execution_role_arn)" \
+  --action-names sqs:ReceiveMessage \
+  --resource-arns "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EvaluationResults[].{Action:EvalActionName,Decision:EvalDecision}'
+```
+
+Here, `Decision: implicitDeny` means that the role has no permission granting `sqs:ReceiveMessage` on this queue. This is the IAM result; the event source mapping command below will not report it.
+
+### Find where processing stops
+
+Send one valid job:
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"increment-17-iam","imageId":"image-456","operation":"resize"}'
+sleep 60
+```
+
+SQS returns a `MessageId` when it accepts the job. The wait gives the poller time to act and the approximate queue count time to settle.
+
+```bash
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EventSourceMappings[].{UUID:UUID,State:State,Queue:EventSourceArn,Function:FunctionArn}'
+```
+
+One mapping with `State: Enabled`, the source queue ARN, and the Lambda function ARN confirms that the connection still exists and is configured to run. Record its UUID for the restoration check. These values can be unchanged after the IAM edit: the mapping output does not report whether SQS authorized a receive request. An empty list would mean no mapping matches this queue and function; `Disabled` would be a separate mapping problem.
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+About one visible message and zero in flight means the job is waiting in SQS. The counts are approximate and can lag.
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 10m
+```
+
+There should be no `SQS event received` or `Image job received` entry for `increment-17-iam`; older jobs may still appear in the log window. Together, the IAM denial, waiting message, and missing job-specific log place the failure before the handler. Because the job was not received, it produces no handler error and does not advance toward the DLQ's receive-count threshold.
+
+### Restore the permission and consume the waiting job
+
+```bash
+terraform -chdir=terraform plan -out=increment-17-restore.tfplan
+terraform -chdir=terraform show increment-17-restore.tfplan
+```
+
+The saved plan should add `sqs:ReceiveMessage` to the policy in place. If AWS deactivated the mapping, the plan may also correct its state.
+
+```bash
+terraform -chdir=terraform apply increment-17-restore.tfplan
+sleep 120
+```
+
+The apply should complete the planned changes. The wait gives the restored permission time to propagate.
+
+```bash
+aws iam get-role-policy \
+  --role-name "$(terraform -chdir=terraform output -raw lambda_function_name)-execution-role" \
+  --policy-name "$(terraform -chdir=terraform output -raw lambda_function_name)-sqs-consumer" \
+  --query 'PolicyDocument.Statement[].Action'
+```
+
+The action list should again contain `sqs:ReceiveMessage`, alongside `sqs:GetQueueAttributes` and `sqs:DeleteMessage`.
+
+Check the role's decision for this queue:
+
+```bash
+aws iam simulate-principal-policy \
+  --policy-source-arn "$(terraform -chdir=terraform output -raw lambda_execution_role_arn)" \
+  --action-names sqs:ReceiveMessage \
+  --resource-arns "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EvaluationResults[].{Action:EvalActionName,Decision:EvalDecision}'
+```
+
+`Decision: allowed` shows that the role can again receive from this queue.
+
+```bash
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_queue_arn)" \
+  --query 'EventSourceMappings[].{UUID:UUID,State:State,Queue:EventSourceArn,Function:FunctionArn}'
+```
+
+The UUID should match the earlier mapping and its state should be `Enabled`, confirming that the queue-to-function connection remains in place.
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 15m
+```
+
+An `Image job received` entry for the waiting job shows that delivery resumed after the permission was restored.
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+After processing settles, the source queue should have zero visible and zero in-flight messages. The role policy controls whether Lambda can receive from SQS; the event source mapping connects the queue to the function; the handler runs only after Lambda receives the message.

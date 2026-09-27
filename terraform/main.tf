@@ -92,11 +92,10 @@ resource "aws_sqs_queue" "image_jobs" {
 data "aws_iam_policy_document" "lambda_sqs" {
   statement {
     effect = "Allow"
-    actions = [
-      "sqs:DeleteMessage",
-      "sqs:GetQueueAttributes",
-      "sqs:ReceiveMessage",
-    ]
+    actions = concat(
+      ["sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+      var.grant_sqs_receive_message ? ["sqs:ReceiveMessage"] : [],
+    )
     resources = [aws_sqs_queue.image_jobs.arn]
   }
 }

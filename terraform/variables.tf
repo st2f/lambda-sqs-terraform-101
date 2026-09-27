@@ -21,3 +21,9 @@ variable "sqs_mapping_enabled" {
   type        = bool
   default     = true
 }
+
+variable "grant_sqs_receive_message" {
+  description = "Whether the Lambda execution role can receive messages from the image-jobs queue."
+  type        = bool
+  default     = true
+}
