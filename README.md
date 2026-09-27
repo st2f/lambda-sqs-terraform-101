@@ -47,6 +47,7 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 - Documentation: [docs/04-failure-diagnosis.md](docs/04-failure-diagnosis.md)
 
 15. [Terraform Change → Runtime Consequence](docs/04-failure-diagnosis.md#15-terraform-change--runtime-consequence)
+16. [Break the Event Source Mapping](docs/04-failure-diagnosis.md#16-break-the-event-source-mapping)
 
 ### Planned sections
 

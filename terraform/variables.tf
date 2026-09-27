@@ -15,3 +15,9 @@ variable "environment" {
   type        = string
   default     = "dev"
 }
+
+variable "sqs_mapping_enabled" {
+  description = "Whether Lambda polls the image-jobs queue through its event source mapping."
+  type        = bool
+  default     = true
+}
