@@ -270,3 +270,85 @@ aws sqs get-queue-attributes \
 ```
 
 After processing settles, the source queue should have zero visible and zero in-flight messages. The role policy controls whether Lambda can receive from SQS; the event source mapping connects the queue to the function; the handler runs only after Lambda receives the message.
+
+## 18. Add Structured Logging
+
+Follow one poison message through repeated SQS deliveries using small, record-level JSON logs. Each attempt records the SQS `messageId`, the job's `jobId`, and `receiveCount`, so the same message can be recognized when Lambda invokes the handler again.
+
+Prerequisites:
+
+- The Lambda, source queue, DLQ, execution role, and enabled SQS event source mapping in `terraform/main.tf` are deployed. The role has `sqs:ReceiveMessage`, and the mapping uses `ReportBatchItemFailures`.
+- The source queue and DLQ are empty, with no other producers or consumers during the experiment.
+- AWS CLI credentials can deploy with Terraform, send SQS messages, and read Lambda logs and queue attributes. Run commands from the repository root; Terraform is initialized in `terraform/`.
+
+Relevant files:
+
+- `src/handler-sqs-structured.ts` logs a small JSON object for each record and returns failed message IDs for retry. It does not log the full SQS event or message body.
+- `test/handler-sqs-structured.test.ts` checks the fields shared by repeated deliveries of one poison message.
+- `src/invoke-sqs-structured.ts` provides a local successful invocation through `npm run invoke:sqs:structured`.
+- `package.json` builds this new handler into `dist/handler.js`. Terraform still deploys `handler.handler` from that ZIP; no Terraform configuration changes are needed.
+
+The earlier `src/handler-sqs.ts` and its tests remain available locally. Deploying this new handler changes the SQS logs: the earlier envelope-log example cannot be replayed in AWS until the build entry is switched back and redeployed.
+
+### Build and deploy the logging change
+
+Run local checks, build the ZIP input, and inspect a saved Terraform plan:
+
+```bash
+npm run check
+npm run invoke:sqs:structured
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-18.tfplan
+terraform -chdir=terraform show increment-18.tfplan
+```
+
+The local invocation should print one `Image job processed` JSON object containing `level`, `messageId`, `jobId`, `operation`, and `receiveCount`. The plan should update only the Lambda code in place because the bundled handler changed; the queue, DLQ, IAM policy, and event source mapping should remain as deployed. Review the complete plan before applying it:
+
+```bash
+terraform -chdir=terraform apply increment-18.tfplan
+```
+
+### Trace one failed message
+
+Send a job whose operation the handler rejects:
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"job-18-poison","imageId":"image-456","operation":"unsupported"}'
+```
+
+SQS returns a `MessageId`. Keep it for comparison with the log entries. Follow the Lambda logs until the failed record has appeared on multiple deliveries, then stop the tail with Ctrl-C:
+
+```bash
+aws logs tail "$(terraform -chdir=terraform output -raw lambda_log_group_name)" \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --since 5m --follow
+```
+
+Each failure log has `level: "error"`, the same `messageId` from the send response, `jobId: "job-18-poison"`, `operation: "unsupported"`, and `errorType: "UnsupportedOperation"`. The `receiveCount` rises on later deliveries, usually from `1` to `2` to `3`; the source queue's visibility timeout is 35 seconds, so retries are separated in time. The handler reports this message ID in `batchItemFailures`, allowing the Lambda invocation to finish normally while SQS retries the failed record.
+
+The `messageId` follows this particular SQS message through retries. The `jobId` is the business identifier in its body; a separately sent message for the same job could have a different `messageId`. Lambda's invocation request ID identifies one invocation, so it changes between retries. These fields answer different correlation questions without logging the entire event.
+
+After the repeated failures have settled, inspect the source queue:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+The source queue should eventually have zero visible and zero in-flight messages. Check the DLQ:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+The DLQ should eventually have one visible message. Queue counts are approximate and can lag; repeat the read if the log history shows the retries but the queue counts have not settled yet.

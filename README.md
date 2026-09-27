@@ -49,18 +49,20 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 15. [Terraform Change → Runtime Consequence](docs/04-failure-diagnosis.md#15-terraform-change--runtime-consequence)
 16. [Break the Event Source Mapping](docs/04-failure-diagnosis.md#16-break-the-event-source-mapping)
 17. [Break IAM Deliberately](docs/04-failure-diagnosis.md#17-break-iam-deliberately)
+18. [Add Structured Logging](docs/04-failure-diagnosis.md#18-add-structured-logging)
 
 ### Planned sections
 
-- Increments 16–20: failure diagnosis and observability
+- Increments 19–20: failure diagnosis and observability
 - Increments 21–24: FIFO behavior and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review
 - Increments 31–32: optional tooling
 
 ## Project commands
 
-- `npm run build` — bundle the SQS handler into `dist/handler.js` for Lambda.
+- `npm run build` — bundle the structured SQS handler into `dist/handler.js` for Lambda.
 - `npm run invoke` — process the example image job locally.
+- `npm run invoke:sqs:structured` — run one structured SQS delivery locally.
 - `npm test` — run the tests once with Vitest.
 - `npm run typecheck` — check TypeScript without emitting JavaScript.
 - `npm run check` — run both the type checker and tests.
