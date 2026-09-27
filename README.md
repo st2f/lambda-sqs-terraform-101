@@ -50,10 +50,11 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 16. [Break the Event Source Mapping](docs/04-failure-diagnosis.md#16-break-the-event-source-mapping)
 17. [Break IAM Deliberately](docs/04-failure-diagnosis.md#17-break-iam-deliberately)
 18. [Add Structured Logging](docs/04-failure-diagnosis.md#18-add-structured-logging)
+19. [Observe Useful Metrics](docs/04-failure-diagnosis.md#19-observe-useful-metrics)
 
 ### Planned sections
 
-- Increments 19–20: failure diagnosis and observability
+- Increment 20: failure diagnosis and observability
 - Increments 21–24: FIFO behavior and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review
 - Increments 31–32: optional tooling

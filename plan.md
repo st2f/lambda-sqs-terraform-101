@@ -752,18 +752,16 @@ Inspect useful built-in metrics for:
 
 - invocations
 - errors
-- duration
-- throttles if applicable
 
 ### SQS
 
-- approximate number of visible messages
 - messages received
 - messages sent
-- age of oldest message if available/relevant
 - DLQ message count
 
-Do not build a large dashboard.
+Use a known workload that makes these five observations interpretable. Do not build a large dashboard.
+
+Defer source-queue depth and message age until a deliberately paused consumer creates a visible backlog. Defer duration until a controlled processing delay or timeout changes it. Defer throttles until a separate controlled concurrency-limit experiment produces them.
 
 Use the AWS console and/or CLI to understand what each metric tells you.
 

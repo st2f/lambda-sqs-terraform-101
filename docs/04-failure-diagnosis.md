@@ -352,3 +352,132 @@ aws sqs get-queue-attributes \
 ```
 
 The DLQ should eventually have one visible message. Queue counts are approximate and can lag; repeat the read if the log history shows the retries but the queue counts have not settled yet.
+
+## 19. Observe Useful Metrics
+
+CloudWatch's built-in Lambda and SQS metrics show activity across the function and queues, without reading individual messages. Send one successful job and one poison job, then compare the resulting counts. The structured handler reports the poison record as a partial batch failure, which makes its retries especially useful for interpreting these metrics.
+
+Prerequisites:
+
+- The Lambda, source queue, DLQ, execution role, and enabled SQS event source mapping in `terraform/main.tf` are deployed. The deployed `dist/handler.js` is built from `src/handler-sqs-structured.ts`; the role can receive SQS messages and the mapping uses `ReportBatchItemFailures`.
+- The source queue is empty and no other producer or consumer uses it during this experiment. Existing DLQ messages can remain; note their count before sending new work.
+- AWS CLI credentials can send SQS messages and read CloudWatch metrics and SQS queue attributes. Run commands from the repository root on macOS, with Terraform initialized in `terraform/`.
+
+Relevant files: `terraform/outputs.tf` supplies the function and queue names used as metric dimensions. `src/handler-sqs-structured.ts` processes `resize` and reports `unsupported` as a failed record. No infrastructure change or deployment is needed.
+
+### Produce a small, known workload
+
+Set the metric window's start **before** sending. The two-minute margin includes the start of the minute in which SQS accepts the messages; it should exclude older exercises. The `date -v` syntax is for macOS:
+
+```bash
+METRIC_REGION="$(terraform -chdir=terraform output -raw aws_region)"
+METRIC_FUNCTION="$(terraform -chdir=terraform output -raw lambda_function_name)"
+METRIC_QUEUE="$(terraform -chdir=terraform output -raw image_jobs_queue_name)"
+METRIC_DLQ="$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_name)"
+METRIC_START="$(date -u -v-2M +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+Record the current DLQ count:
+
+```bash
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages
+```
+
+Keep this approximate count as a baseline. Send the two jobs to the source queue:
+
+```bash
+aws sqs send-message-batch \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --entries '[
+    {"Id":"ok","MessageBody":"{\"jobId\":\"job-19-ok\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"},
+    {"Id":"poison","MessageBody":"{\"jobId\":\"job-19-poison\",\"imageId\":\"image-456\",\"operation\":\"unsupported\"}"}
+  ]'
+```
+
+Both entries should appear under `Successful`, with none under `Failed`. Allow the poison message to be received repeatedly and moved to the DLQ:
+
+```bash
+sleep 180
+aws sqs get-queue-attributes \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)" \
+  --attribute-names ApproximateNumberOfMessages
+```
+
+The DLQ's approximate visible count should be one above the baseline. If it has not risen, wait and repeat this read before interpreting the metrics. CloudWatch may need another minute or two to publish the recent points.
+
+Set the window's end after the wait:
+
+```bash
+METRIC_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+### Read Lambda metrics
+
+Each command names its metric in the result. `ReportedMinutes` is the number of one-minute periods with data; the other field is the value to interpret. This avoids matching unlabeled arrays to names printed by a loop. CloudWatch can return raw points out of time order, so these queries reduce them to one result per metric.
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --region "$METRIC_REGION" --namespace AWS/Lambda --metric-name Invocations \
+  --dimensions "Name=FunctionName,Value=$METRIC_FUNCTION" \
+  --start-time "$METRIC_START" --end-time "$METRIC_END" \
+  --period 60 --statistics Sum \
+  --query '{Invocations:sum(Datapoints[].Sum),ReportedMinutes:length(Datapoints)}' --no-cli-pager
+```
+
+For example, `"Invocations": 3` means the handler ran three times during this window; it does not mean three distinct messages. One initial batch and two retries could produce that value. Batch composition can change the exact number.
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --region "$METRIC_REGION" --namespace AWS/Lambda --metric-name Errors \
+  --dimensions "Name=FunctionName,Value=$METRIC_FUNCTION" \
+  --start-time "$METRIC_START" --end-time "$METRIC_END" \
+  --period 60 --statistics Sum \
+  --query '{Errors:sum(Datapoints[].Sum),ReportedMinutes:length(Datapoints)}' --no-cli-pager
+```
+
+`"Errors": 0` with `ReportedMinutes` greater than zero means no invocation failed with a function or runtime error. The poison *record* did fail; the handler returned its message ID in `batchItemFailures`, so Lambda treated the invocation as successful. `ReportedMinutes: 0` instead means CloudWatch returned no samples for this metric in the window.
+
+### Read source-queue metrics
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --region "$METRIC_REGION" --namespace AWS/SQS --metric-name NumberOfMessagesSent \
+  --dimensions "Name=QueueName,Value=$METRIC_QUEUE" \
+  --start-time "$METRIC_START" --end-time "$METRIC_END" \
+  --period 60 --statistics Sum \
+  --query '{MessagesSent:sum(Datapoints[].Sum),ReportedMinutes:length(Datapoints)}' --no-cli-pager
+```
+
+`MessagesSent` should be 2: the successful `send-message-batch` call added two messages to the source queue. This is a send count, not the current queue depth.
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --region "$METRIC_REGION" --namespace AWS/SQS --metric-name NumberOfMessagesReceived \
+  --dimensions "Name=QueueName,Value=$METRIC_QUEUE" \
+  --start-time "$METRIC_START" --end-time "$METRIC_END" \
+  --period 60 --statistics Sum \
+  --query '{MessagesReceived:sum(Datapoints[].Sum),ReportedMinutes:length(Datapoints)}' --no-cli-pager
+```
+
+`MessagesReceived` should be at least 4: the successful job was received once and the poison job about three times. A receive counts an attempt, so the same SQS message can contribute more than once. SQS is an at-least-once service, so duplicates can make the count higher.
+
+### Check the DLQ
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --region "$METRIC_REGION" --namespace AWS/SQS \
+  --metric-name ApproximateNumberOfMessagesVisible \
+  --dimensions "Name=QueueName,Value=$METRIC_DLQ" \
+  --start-time "$METRIC_START" --end-time "$METRIC_END" \
+  --period 60 --statistics Maximum \
+  --query '{PeakDlqVisible:max(Datapoints[].Maximum),ReportedMinutes:length(Datapoints)}' --no-cli-pager
+```
+
+Compare `PeakDlqVisible` with the baseline you recorded. A baseline of `1` and a peak of `2` means one new message reached the DLQ. Automatic redrive does not increment the DLQ's `NumberOfMessagesSent` metric. If `ReportedMinutes` is zero or the peak has not updated, wait a minute or two, refresh `METRIC_END`, and repeat this read.
+
+The five observations describe different stages of this workload: two messages were sent, the source queue recorded more than two receives, Lambda ran, no invocation failed, and one message reached the DLQ. The repeated receives and growing DLQ are consistent with the poison record being returned in `batchItemFailures`. Lambda `Errors` remains zero because the handler invocation completed successfully.
