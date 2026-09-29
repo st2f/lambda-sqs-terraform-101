@@ -58,7 +58,3 @@ output "image_jobs_dead_letter_queue_name" {
   value       = aws_sqs_queue.image_jobs_dead_letter.name
 }
 
-output "dlq_alarm_name" {
-  description = "CloudWatch alarm that reports visible messages in the dead-letter queue."
-  value       = aws_cloudwatch_metric_alarm.dlq_has_messages.alarm_name
-}
