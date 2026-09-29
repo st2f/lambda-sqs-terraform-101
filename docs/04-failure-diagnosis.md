@@ -440,7 +440,7 @@ aws cloudwatch get-metric-statistics \
   --query '{Errors:sum(Datapoints[].Sum),ReportedMinutes:length(Datapoints)}' --no-cli-pager
 ```
 
-`"Errors": 0` with `ReportedMinutes` greater than zero means no invocation failed with a function or runtime error. The poison *record* did fail; the handler returned its message ID in `batchItemFailures`, so Lambda treated the invocation as successful. `ReportedMinutes: 0` instead means CloudWatch returned no samples for this metric in the window.
+`"Errors": 0` with `ReportedMinutes` greater than zero means no invocation failed with a function or runtime error. The poison _record_ did fail; the handler returned its message ID in `batchItemFailures`, so Lambda treated the invocation as successful. `ReportedMinutes: 0` instead means CloudWatch returned no samples for this metric in the window.
 
 ### Read source-queue metrics
 
@@ -481,3 +481,110 @@ aws cloudwatch get-metric-statistics \
 Compare `PeakDlqVisible` with the baseline you recorded. A baseline of `1` and a peak of `2` means one new message reached the DLQ. Automatic redrive does not increment the DLQ's `NumberOfMessagesSent` metric. If `ReportedMinutes` is zero or the peak has not updated, wait a minute or two, refresh `METRIC_END`, and repeat this read.
 
 The five observations describe different stages of this workload: two messages were sent, the source queue recorded more than two receives, Lambda ran, no invocation failed, and one message reached the DLQ. The repeated receives and growing DLQ are consistent with the poison record being returned in `batchItemFailures`. Lambda `Errors` remains zero because the handler invocation completed successfully.
+
+## 20. Add One CloudWatch Alarm
+
+Alarm on the signal that a job has exhausted its retries: at least one visible message in the DLQ. Terraform creates the alarm, a poison job trips it, and clearing the DLQ lets it recover. The alarm has no notification action; you observe its state transitions with the CLI.
+
+Prerequisites:
+
+- The Lambda, source queue, DLQ, execution role, and enabled SQS event source mapping in `terraform/main.tf` are deployed. The deployed `dist/handler.js` is built from `src/handler-sqs-structured.ts`, and the mapping uses `ReportBatchItemFailures`.
+- The source queue **and the DLQ** are empty, with no other producer or consumer during the experiment. A leftover DLQ message would put the alarm into `ALARM` as soon as it exists and hide the transition. Inspect the DLQ before deciding whether to purge it; the purge step at the end of this exercise deletes every message in it.
+- AWS CLI credentials can apply Terraform, send SQS messages, purge the DLQ, and read CloudWatch alarms. Run commands from the repository root; Terraform is initialized in `terraform/`.
+
+Relevant files: `terraform/main.tf` defines `aws_cloudwatch_metric_alarm.dlq_has_messages`; `terraform/outputs.tf` exposes its name as `dlq_alarm_name`. No application change is needed.
+
+### The alarm, piece by piece
+
+| Setting | Value | Meaning |
+| --- | --- | --- |
+| Metric | `AWS/SQS` `ApproximateNumberOfMessagesVisible`, dimension `QueueName` = the DLQ | Messages waiting in the DLQ that a consumer could receive. Nothing consumes this queue, so a failed job stays visible. |
+| Statistic and period | `Maximum` over 60 seconds | The highest count seen in each one-minute window. |
+| Threshold | `GreaterThanThreshold` `0` | Any visible DLQ message breaches. Tuned for a lab where the DLQ is normally empty. |
+| Evaluation periods | `1` | One breaching period is enough to enter `ALARM`; one non-breaching period returns it to `OK`. Larger values trade speed for fewer false alarms. |
+| Missing data | `notBreaching` | An inactive SQS queue may stop publishing metrics after several hours. Treating missing data as `notBreaching` avoids INSUFFICIENT_DATA during normal inactivity, with the trade-off that an unexpected metrics gap will not trigger the alarm. |
+
+The metric only sees what SQS already counted. Logs show why a record failed, but nobody reads logs continuously: the alarm turns a state that a person would otherwise have to go looking for into something that announces itself. It also catches failures that never log, such as a Lambda that is never invoked and a queue that fills up.
+
+### Review and create the alarm
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-20.tfplan
+terraform -chdir=terraform show increment-20.tfplan
+```
+
+Expect exactly one addition, `aws_cloudwatch_metric_alarm.dlq_has_messages`, and no change to the queues, Lambda, IAM policy, or mapping. The alarm references the DLQ by name only; SQS does not know about it. Apply the saved plan:
+
+```bash
+terraform -chdir=terraform apply increment-20.tfplan
+```
+
+CloudWatch standard alarms cost about $0.10 per month each; a lab alarm left running is negligible, and `terraform destroy` removes it.
+
+Read the initial state:
+
+```bash
+aws cloudwatch describe-alarms \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --alarm-names "$(terraform -chdir=terraform output -raw dlq_alarm_name)" \
+  --query 'MetricAlarms[].{Name:AlarmName,State:StateValue,Reason:StateReason}' --no-cli-pager
+```
+
+A new alarm starts in `INSUFFICIENT_DATA` and moves to `OK` after its first evaluation, usually within a few minutes. Repeat the command until it reports `OK` before sending work.
+
+### Trigger the alarm
+
+```bash
+aws sqs send-message \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_queue_url)" \
+  --message-body '{"jobId":"job-20-poison","imageId":"image-456","operation":"unsupported"}'
+sleep 240
+```
+
+The handler reports the record as failed on each delivery. With `maxReceiveCount` 3 and a 35-second visibility timeout, SQS moves it to the DLQ after roughly two minutes. The extra wait covers SQS and CloudWatch metric delay.
+
+```bash
+aws cloudwatch describe-alarms \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --alarm-names "$(terraform -chdir=terraform output -raw dlq_alarm_name)" \
+  --query 'MetricAlarms[].{State:StateValue,Reason:StateReason,Updated:StateUpdatedTimestamp}' --no-cli-pager
+```
+
+Expect `State: ALARM`; the reason names the datapoint that crossed the threshold. If it is still `OK`, wait a minute and repeat: metric publication and evaluation each lag. Lambda `Errors` stays at zero throughout, as in Increment 19, so an alarm on that metric would have missed this failure.
+
+Read the transition history:
+
+```bash
+aws cloudwatch describe-alarm-history \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --alarm-name "$(terraform -chdir=terraform output -raw dlq_alarm_name)" \
+  --history-item-type StateUpdate --max-items 5 \
+  --query 'AlarmHistoryItems[].{Time:Timestamp,Summary:HistorySummary}' --no-cli-pager
+```
+
+Expect entries such as `INSUFFICIENT_DATA to OK` and `OK to ALARM`, newest first.
+
+### Clear the condition and watch recovery
+
+Investigate the failed job first if this were real work. For this lab, confirm the DLQ contains only `job-20-poison`, then purge it. Purging permanently deletes all its messages:
+
+```bash
+aws sqs purge-queue \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --queue-url "$(terraform -chdir=terraform output -raw image_jobs_dead_letter_queue_url)"
+sleep 180
+```
+
+Repeat the `describe-alarms` command. Expect `State: OK` again, and a further `ALARM to OK` entry in the history. The alarm recovers only when the underlying condition is gone: it reflects the DLQ's current contents, not whether someone has noticed the failure.
+
+### What to take away
+
+- A metric is a number CloudWatch keeps over time. An alarm is a rule evaluated against it: statistic, period, threshold, and evaluation periods decide when its state changes.
+- The alarm and the redrive policy are unrelated resources. The redrive policy moves the message; the alarm only watches the resulting DLQ depth.
+- A DLQ alarm answers "did work exhaust its retries?". It does not detect a disabled mapping or missing IAM permission, since no message reaches the DLQ. Queue depth with zero invocations, from Increment 19, would be a separate signal.
+- Rollback: remove the alarm resource and its output, then `terraform apply`. Nothing else depends on it.

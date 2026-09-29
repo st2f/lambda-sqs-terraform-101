@@ -51,10 +51,10 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 17. [Break IAM Deliberately](docs/04-failure-diagnosis.md#17-break-iam-deliberately)
 18. [Add Structured Logging](docs/04-failure-diagnosis.md#18-add-structured-logging)
 19. [Observe Useful Metrics](docs/04-failure-diagnosis.md#19-observe-useful-metrics)
+20. [Add One CloudWatch Alarm](docs/04-failure-diagnosis.md#20-add-one-cloudwatch-alarm)
 
 ### Planned sections
 
-- Increment 20: failure diagnosis and observability
 - Increments 21–24: FIFO behavior and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review
 - Increments 31–32: optional tooling

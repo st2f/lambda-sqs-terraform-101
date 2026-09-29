@@ -117,3 +117,21 @@ resource "aws_lambda_event_source_mapping" "image_jobs" {
 
   depends_on = [aws_iam_role_policy.lambda_sqs]
 }
+
+resource "aws_cloudwatch_metric_alarm" "dlq_has_messages" {
+  alarm_name        = "${local.function_name}-image-jobs-dlq-has-messages"
+  alarm_description = "At least one failed image job is visible in the dead-letter queue."
+
+  namespace   = "AWS/SQS"
+  metric_name = "ApproximateNumberOfMessagesVisible"
+  dimensions = {
+    QueueName = aws_sqs_queue.image_jobs_dead_letter.name
+  }
+
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data = "notBreaching"
+}
