@@ -58,3 +58,18 @@ output "image_jobs_dead_letter_queue_name" {
   value       = aws_sqs_queue.image_jobs_dead_letter.name
 }
 
+
+output "image_jobs_fifo_queue_url" {
+  description = "Regional HTTPS endpoint used by the SQS data-plane API for the FIFO experiment."
+  value       = aws_sqs_queue.image_jobs_fifo.url
+}
+
+output "image_jobs_fifo_queue_arn" {
+  description = "Globally unique AWS identifier of the FIFO experiment queue."
+  value       = aws_sqs_queue.image_jobs_fifo.arn
+}
+
+output "image_jobs_fifo_queue_name" {
+  description = "Name of the FIFO experiment queue; it must end in .fifo."
+  value       = aws_sqs_queue.image_jobs_fifo.name
+}

@@ -89,6 +89,15 @@ resource "aws_sqs_queue" "image_jobs" {
   })
 }
 
+# Standalone FIFO experiment: no redrive policy, no event source mapping, no Lambda.
+resource "aws_sqs_queue" "image_jobs_fifo" {
+  name       = "${local.function_name}-image-jobs.fifo"
+  fifo_queue = true
+
+  # Producers must supply MessageDeduplicationId, which makes deduplication visible.
+  content_based_deduplication = false
+}
+
 data "aws_iam_policy_document" "lambda_sqs" {
   statement {
     effect = "Allow"

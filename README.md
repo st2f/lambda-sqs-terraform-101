@@ -53,9 +53,15 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 19. [Observe Useful Metrics](docs/04-failure-diagnosis.md#19-observe-useful-metrics)
 20. [Add One CloudWatch Alarm](docs/04-failure-diagnosis.md#20-add-one-cloudwatch-alarm)
 
+### 05 FIFO Behavior and Concurrency
+
+- Documentation: [docs/05-fifo.md](docs/05-fifo.md)
+
+21. [Introduce a FIFO Queue](docs/05-fifo.md#21-introduce-a-fifo-queue)
+
 ### Planned sections
 
-- Increments 21–24: FIFO behavior and concurrency
+- Increments 22–24: FIFO poison messages, partial batches, and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review
 - Increments 31–32: optional tooling
 
