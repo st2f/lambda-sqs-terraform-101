@@ -2,7 +2,10 @@ export interface SqsEvent {
   Records: Array<{
     messageId: string;
     body: string;
-    attributes: { ApproximateReceiveCount: string };
+    attributes: {
+      ApproximateReceiveCount: string;
+      MessageGroupId?: string;
+    };
   }>;
 }
 

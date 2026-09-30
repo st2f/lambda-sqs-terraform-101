@@ -145,7 +145,6 @@ aws sqs purge-queue --region "$FIFO_REGION" --queue-url "$FIFO_URL"
 - A FIFO queue preserves order within a `MessageGroupId`, not across the whole queue. Choose the group by the entity whose events must stay ordered.
 - The deduplication ID makes a repeated send within five minutes a no-op. It protects against producer retries; it is not consumer-side idempotency, and it does not stop a message from being delivered twice to a consumer.
 - FIFO does not mean one globally serialized consumer. While a group has messages in flight, SQS holds back that group's later messages; other groups remain available, so several consumers can work on different groups at once. Ordering limits concurrency inside a group, not between groups.
-- Rollback: remove the FIFO resource and its outputs, then `terraform apply`. Nothing else depends on it.
 
 ## 22. FIFO Poison Message
 
@@ -280,8 +279,6 @@ Purge the FIFO DLQ after inspecting it. This deletes every message in it:
 ```bash
 aws sqs purge-queue --region "$FIFO_REGION" --queue-url "$FIFO_DLQ_URL"
 ```
-
-Rollback: remove the FIFO DLQ, the redrive policy, the FIFO mapping, and the FIFO queue ARN from the IAM policy, then `terraform apply`. A live mapping should be removed before, or in the same apply as, the queue it reads from.
 
 ## 23. FIFO + Partial Batch Failure
 
@@ -459,4 +456,125 @@ aws sqs purge-queue --region "$FIFO_REGION" --queue-url "$FIFO_DLQ_URL"
 - **FIFO handler:** the failed record and everything after it stay in the group and are retried together.
 - **Unprocessed records are not free.** They are received again with the failed record, so their receive counts rise with it and `maxReceiveCount` can affect messages that never failed.
 - **Batch size:** with batch size 1, as in Increment 22, there are no later records, so the two handlers behave the same.
-- Rollback: set `sqs_fifo_batch_size` back to `1`, run `npm run build`, and apply.
+
+## 24. Observe FIFO Concurrency
+
+Give successful jobs a three-second processing delay, then send work to two message groups. The delay is intentionally inefficient: it creates a wide enough interval to see that different groups can overlap while messages within one group remain ordered.
+
+Prerequisites:
+
+- The FIFO queue and mapping from Increment 23 are deployed and the FIFO queue and DLQ are empty.
+- The FIFO-aware handler is the intended deployed handler. The standard queue should be idle because both mappings invoke the same Lambda function.
+- AWS CLI credentials can apply Terraform, send SQS messages, and read Lambda logs. Run commands from the repository root; Terraform is initialized in `terraform/`.
+
+Relevant changes:
+
+- `src/handler-sqs-fifo.ts` logs `Image job started` and `Image job processed` with an ISO timestamp and `MessageGroupId`, with a three-second delay between them. The delay is application behavior for this experiment, not a Lambda or SQS setting.
+- `terraform/main.tf` returns the FIFO mapping's batch size from three to one. One message per invocation makes the concurrency boundary unambiguous: overlapping start/finish intervals belong to separate Lambda invocations, not to records in one batch.
+- `test/handler-sqs-fifo.test.ts` injects a zero-delay or fake wait, so local tests verify the behavior without becoming slow.
+
+No reserved concurrency, maximum concurrency, or other scaling control is added. This increment observes the default behavior rather than tuning it.
+
+### Build and inspect the change
+
+Run the local checks and build the FIFO-aware handler:
+
+```bash
+npm run check
+npm run invoke:sqs:fifo
+npm run build:fifo
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-24.tfplan
+terraform -chdir=terraform show increment-24.tfplan
+```
+
+The local invocation uses a 100 ms delay so it remains quick, but its two JSON log entries show the fields that the deployed three-second experiment uses. Expect two in-place updates in the Terraform plan:
+
+- `aws_lambda_event_source_mapping.image_jobs_fifo` changes `batch_size` from `3` to `1`;
+- `aws_lambda_function.image_processor` changes `source_code_hash` for the new handler code.
+
+There should be no queue, IAM, or event-source-mapping replacement. Apply the reviewed plan, then verify the deployed batch size:
+
+```bash
+terraform -chdir=terraform apply increment-24.tfplan
+
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_fifo_queue_arn)" \
+  --query 'EventSourceMappings[].{State:State,BatchSize:BatchSize}'
+```
+
+Wait for `State` to be `Enabled` and confirm `BatchSize` is `1`.
+
+### Send two ordered streams
+
+Send `A`, `B` for `customer-1` and `X`, `Y` for `customer-2` in one API call. The run ID avoids FIFO's five-minute deduplication window if the experiment is repeated:
+
+```bash
+FIFO_REGION="$(terraform -chdir=terraform output -raw aws_region)"
+FIFO_URL="$(terraform -chdir=terraform output -raw image_jobs_fifo_queue_url)"
+LOG_GROUP="$(terraform -chdir=terraform output -raw lambda_log_group_name)"
+RUN_ID="job-24-$(date +%s)"
+ENTRIES_FILE="$(mktemp)"
+
+cat > "$ENTRIES_FILE" <<JSON
+[
+  {"Id":"a","MessageGroupId":"customer-1","MessageDeduplicationId":"$RUN_ID-a","MessageBody":"{\"jobId\":\"$RUN_ID-customer-1-A\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"},
+  {"Id":"x","MessageGroupId":"customer-2","MessageDeduplicationId":"$RUN_ID-x","MessageBody":"{\"jobId\":\"$RUN_ID-customer-2-X\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"},
+  {"Id":"b","MessageGroupId":"customer-1","MessageDeduplicationId":"$RUN_ID-b","MessageBody":"{\"jobId\":\"$RUN_ID-customer-1-B\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"},
+  {"Id":"y","MessageGroupId":"customer-2","MessageDeduplicationId":"$RUN_ID-y","MessageBody":"{\"jobId\":\"$RUN_ID-customer-2-Y\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"}
+]
+JSON
+
+aws sqs send-message-batch --region "$FIFO_REGION" --queue-url "$FIFO_URL" \
+  --entries "file://$ENTRIES_FILE" \
+  --query 'Successful[].{Id:Id,MessageId:MessageId,Sequence:SequenceNumber}'
+rm "$ENTRIES_FILE"
+```
+
+All four entries should succeed. Their global display order is not the ordering guarantee; compare sequence and processing only within each message group.
+
+### Observe the overlap and the ordering boundary
+
+Allow the four jobs to finish, then filter the shared log group by this run's unique prefix:
+
+```bash
+sleep 15
+aws logs tail "$LOG_GROUP" --region "$FIFO_REGION" --since 5m \
+  --format short --filter-pattern "\"$RUN_ID\""
+```
+
+Each job has a start and processed entry. Use the embedded `timestamp`, `messageGroupId`, and `jobId` to compare the intervals. A typical result has this shape (the two groups can exchange places):
+
+```text
+customer-1 A  started   12:00:00
+customer-2 X  started   12:00:00
+customer-1 A  processed 12:00:03
+customer-2 X  processed 12:00:03
+customer-1 B  started   12:00:03
+customer-2 Y  started   12:00:03
+customer-1 B  processed 12:00:06
+customer-2 Y  processed 12:00:06
+```
+
+The evidence to look for is two different things:
+
+- **Across groups:** an `A`/`X` start occurs before the other group's corresponding `processed` entry. Their three-second intervals overlap, so separate Lambda invocations were in progress concurrently.
+- **Within a group:** `B` does not start before `A` is processed, and `Y` does not start before `X` is processed. SQS does not make a later message in a group available while an earlier message from that group is in flight.
+
+```text
+customer-1: A ─────────→ B ─────────→
+customer-2:   X ─────────→ Y ─────────→
+              ↑ overlap    ↑ overlap
+```
+
+Exact cross-group order and timestamps are nondeterministic. If the intervals do not overlap, that single run proves only that concurrency was possible but not used; confirm the mapping is enabled, the function has no account-level concurrency constraint, and repeat with a fresh `RUN_ID`.
+
+### What to take away
+
+- **Lambda concurrency** means more than one invocation of the function can be in progress at once. It is not parallel execution of records inside one JavaScript handler invocation.
+- **The event source mapping** polls SQS and decides when batches become Lambda invocations. With batch size one here, every observed processing interval is one invocation.
+- **FIFO constrains each message group.** At most one Lambda invocation can process messages from a given group at a time, preserving that group's order. Different groups are independent and can supply concurrent work.
+- **Ordering and concurrency are related, not opposites.** Choosing one global group serializes all work; choosing meaningful independent groups preserves order where needed while allowing overlap elsewhere. More groups only create the opportunity for concurrency—available messages, Lambda capacity, and event-source-mapping scaling still determine what happens at a particular moment.

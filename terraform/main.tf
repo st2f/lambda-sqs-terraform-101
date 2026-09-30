@@ -4,7 +4,8 @@ locals {
   lambda_timeout_seconds      = 5
   sqs_batch_size              = 4
   sqs_batching_window_seconds = 5
-  sqs_fifo_batch_size         = 3
+  # One record per invocation makes overlap between message groups easy to see.
+  sqs_fifo_batch_size = 1
   # Deliberately low for the DLQ exercise; choose this from operational needs in production.
   sqs_max_receive_count = 3
   # AWS recommends six times the Lambda timeout, plus any batching window.
@@ -148,7 +149,6 @@ resource "aws_lambda_event_source_mapping" "image_jobs" {
   depends_on = [aws_iam_role_policy.lambda_sqs]
 }
 
-# Several records per invocation make the FIFO ordering risk of partial batch responses visible.
 resource "aws_lambda_event_source_mapping" "image_jobs_fifo" {
   event_source_arn = aws_sqs_queue.image_jobs_fifo.arn
   function_name    = aws_lambda_function.image_processor.arn
