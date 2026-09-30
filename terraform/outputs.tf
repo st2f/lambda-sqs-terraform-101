@@ -73,3 +73,13 @@ output "image_jobs_fifo_queue_name" {
   description = "Name of the FIFO experiment queue; it must end in .fifo."
   value       = aws_sqs_queue.image_jobs_fifo.name
 }
+
+output "image_jobs_fifo_dead_letter_queue_url" {
+  description = "Regional HTTPS endpoint used to inspect failed FIFO image jobs."
+  value       = aws_sqs_queue.image_jobs_fifo_dead_letter.url
+}
+
+output "image_jobs_fifo_dead_letter_queue_name" {
+  description = "Name of the FIFO dead-letter queue for failed image jobs."
+  value       = aws_sqs_queue.image_jobs_fifo_dead_letter.name
+}

@@ -89,13 +89,30 @@ resource "aws_sqs_queue" "image_jobs" {
   })
 }
 
-# Standalone FIFO experiment: no redrive policy, no event source mapping, no Lambda.
+# A FIFO queue's dead-letter queue must also be FIFO.
+resource "aws_sqs_queue" "image_jobs_fifo_dead_letter" {
+  name       = "${local.function_name}-image-jobs-dlq.fifo"
+  fifo_queue = true
+
+  message_retention_seconds = 14 * 24 * 60 * 60
+}
+
 resource "aws_sqs_queue" "image_jobs_fifo" {
   name       = "${local.function_name}-image-jobs.fifo"
   fifo_queue = true
 
   # Producers must supply MessageDeduplicationId, which makes deduplication visible.
   content_based_deduplication = false
+
+  # Six times the Lambda timeout; the FIFO mapping uses no batching window.
+  visibility_timeout_seconds = 6 * local.lambda_timeout_seconds
+
+  # limit the poison-message retries
+  # or it will block its message group until retention expires
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.image_jobs_fifo_dead_letter.arn
+    maxReceiveCount     = local.sqs_max_receive_count
+  })
 }
 
 data "aws_iam_policy_document" "lambda_sqs" {
@@ -105,7 +122,10 @@ data "aws_iam_policy_document" "lambda_sqs" {
       ["sqs:DeleteMessage", "sqs:GetQueueAttributes"],
       var.grant_sqs_receive_message ? ["sqs:ReceiveMessage"] : [],
     )
-    resources = [aws_sqs_queue.image_jobs.arn]
+    resources = [
+      aws_sqs_queue.image_jobs.arn,
+      aws_sqs_queue.image_jobs_fifo.arn,
+    ]
   }
 }
 
@@ -127,3 +147,13 @@ resource "aws_lambda_event_source_mapping" "image_jobs" {
   depends_on = [aws_iam_role_policy.lambda_sqs]
 }
 
+# Batch size 1 keeps each invocation to one record, so a failure affects exactly one message.
+resource "aws_lambda_event_source_mapping" "image_jobs_fifo" {
+  event_source_arn = aws_sqs_queue.image_jobs_fifo.arn
+  function_name    = aws_lambda_function.image_processor.arn
+
+  batch_size              = 1
+  function_response_types = ["ReportBatchItemFailures"]
+
+  depends_on = [aws_iam_role_policy.lambda_sqs]
+}

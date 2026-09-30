@@ -58,10 +58,11 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 - Documentation: [docs/05-fifo.md](docs/05-fifo.md)
 
 21. [Introduce a FIFO Queue](docs/05-fifo.md#21-introduce-a-fifo-queue)
+22. [FIFO Poison Message](docs/05-fifo.md#22-fifo-poison-message)
 
 ### Planned sections
 
-- Increments 22–24: FIFO poison messages, partial batches, and concurrency
+- Increments 23–24: FIFO partial batches and concurrency
 - Increments 25–30: Terraform state, drift, testing, and review
 - Increments 31–32: optional tooling
 
