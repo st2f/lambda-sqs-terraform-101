@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build:lambda",
-    "build:lambda": "esbuild src/handler-sqs-structured.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handler.js",
+    "build": "npm run build:structured",
+    "build:structured": "esbuild src/handler-sqs-structured.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handler.js",
+    "build:fifo": "esbuild src/handler-sqs-fifo.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/handler.js",
     "invoke": "node --import tsx src/invoke.ts",
     "invoke:sqs": "node --import tsx src/invoke-sqs.ts",
     "invoke:sqs:structured": "node --import tsx src/invoke-sqs-structured.ts",
+    "invoke:sqs:fifo": "node --import tsx src/invoke-sqs-fifo.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"

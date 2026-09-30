@@ -59,18 +59,21 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 
 21. [Introduce a FIFO Queue](docs/05-fifo.md#21-introduce-a-fifo-queue)
 22. [FIFO Poison Message](docs/05-fifo.md#22-fifo-poison-message)
+23. [FIFO + Partial Batch Failure](docs/05-fifo.md#23-fifo--partial-batch-failure)
 
 ### Planned sections
 
-- Increments 23–24: FIFO partial batches and concurrency
+- Increment 24: FIFO concurrency
 - Increments 25–30: Terraform state, drift, testing, and review
 - Increments 31–32: optional tooling
 
 ## Project commands
 
 - `npm run build` — bundle the structured SQS handler into `dist/handler.js` for Lambda.
+- `npm run build:fifo` — bundle the FIFO handler instead (Increment 23).
 - `npm run invoke` — process the example image job locally.
 - `npm run invoke:sqs:structured` — run one structured SQS delivery locally.
+- `npm run invoke:sqs:fifo` — run one delivery through the FIFO handler locally.
 - `npm test` — run the tests once with Vitest.
 - `npm run typecheck` — check TypeScript without emitting JavaScript.
 - `npm run check` — run both the type checker and tests.

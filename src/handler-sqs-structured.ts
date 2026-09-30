@@ -1,4 +1,4 @@
-interface SqsEvent {
+export interface SqsEvent {
   Records: Array<{
     messageId: string;
     body: string;
@@ -6,11 +6,11 @@ interface SqsEvent {
   }>;
 }
 
-interface SqsBatchResponse {
+export interface SqsBatchResponse {
   batchItemFailures: Array<{ itemIdentifier: string }>;
 }
 
-function parseJob(body: string): { jobId: string; operation: string } {
+export function parseJob(body: string): { jobId: string; operation: string } {
   const value: unknown = JSON.parse(body);
   if (
     typeof value !== "object" || value === null ||

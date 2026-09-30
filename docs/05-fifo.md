@@ -282,3 +282,181 @@ aws sqs purge-queue --region "$FIFO_REGION" --queue-url "$FIFO_DLQ_URL"
 ```
 
 Rollback: remove the FIFO DLQ, the redrive policy, the FIFO mapping, and the FIFO queue ARN from the IAM policy, then `terraform apply`. A live mapping should be removed before, or in the same apply as, the queue it reads from.
+
+## 23. FIFO + Partial Batch Failure
+
+Send three messages, `A`, `B`, `C`, to one message group in a single batch, with `B` poisoned. Run it twice and compare the two outcomes: with the structured handler, only `B` leaves the group; with a FIFO-aware handler, `B` and `C` stay together.
+
+Prerequisites:
+
+- The resources from Increment 22 are deployed, with the FIFO mapping `Enabled` and `ReportBatchItemFailures` set. The FIFO queue and FIFO DLQ are empty; purge the DLQ if Increment 22 left `B` in it.
+- The currently deployed handler is the structured one from `src/handler-sqs-structured.ts`.
+- AWS CLI credentials can apply Terraform, send SQS messages, purge the FIFO DLQ, and read Lambda logs. Run commands from the repository root; Terraform is initialized in `terraform/`.
+
+Relevant files:
+
+- `terraform/main.tf` sets the FIFO mapping's batch size from `local.sqs_fifo_batch_size`, now 3 instead of 1.
+- `src/handler-sqs-fifo.ts` processes records in order and, at the first failure, reports that record and every later record in `batchItemFailures`. It logs the later records as `Image job not attempted`.
+- `test/handler-sqs-fifo.test.ts` checks that a failure reports the failed and later records, never earlier ones, and does not process later records. `npm run invoke:sqs:fifo` runs one local delivery.
+- `package.json` adds `build:fifo`. `npm run build` still bundles the structured handler, so earlier exercises keep their meaning.
+
+### Two outcomes
+
+With `ReportBatchItemFailures`, Lambda deletes every record in the batch that is not listed in `batchItemFailures`. What the handler lists decides what stays in the group:
+
+```text
+Structured handler            FIFO handler
+A  ok      -> deleted         A  ok             -> deleted
+B  failed  -> retried alone   B  failed         -> retried
+C  ok      -> deleted         C  not attempted  -> retried with B
+```
+
+AWS's guidance for FIFO is the right-hand column: stop at the first failure and report the failed and all unprocessed records.
+
+### Outcome 1: the structured handler
+
+Keep the structured handler's behavior, and change the mapping:
+
+```bash
+npm run check
+npm run build
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan -out=increment-23-batch.tfplan
+terraform -chdir=terraform show increment-23-batch.tfplan
+```
+
+Expect two in-place updates and no replacement or destroy:
+
+- `aws_lambda_event_source_mapping.image_jobs_fifo`, with `batch_size` going from `1` to `3`. This is the change the exercise is about.
+- `aws_lambda_function.image_processor`, with only `source_code_hash` changing
+
+```bash
+terraform -chdir=terraform apply increment-23-batch.tfplan
+
+aws lambda list-event-source-mappings \
+  --region "$(terraform -chdir=terraform output -raw aws_region)" \
+  --function-name "$(terraform -chdir=terraform output -raw lambda_function_name)" \
+  --event-source-arn "$(terraform -chdir=terraform output -raw image_jobs_fifo_queue_arn)" \
+  --query 'EventSourceMappings[].{State:State,BatchSize:BatchSize}'
+```
+
+Define a helper that sends `A`, `B`, `C` to `customer-1` in one `send-message-batch` call, so they are more likely to arrive in one invocation. `B` carries an operation the handler rejects:
+
+```bash
+FIFO_REGION="$(terraform -chdir=terraform output -raw aws_region)"
+FIFO_URL="$(terraform -chdir=terraform output -raw image_jobs_fifo_queue_url)"
+FIFO_DLQ_URL="$(terraform -chdir=terraform output -raw image_jobs_fifo_dead_letter_queue_url)"
+LOG_GROUP="$(terraform -chdir=terraform output -raw lambda_log_group_name)"
+
+send_abc() {
+  local entries
+  entries="$(mktemp)"
+  cat > "$entries" <<JSON
+[
+  {"Id":"a","MessageGroupId":"customer-1","MessageDeduplicationId":"$1-A","MessageBody":"{\"jobId\":\"$1-A\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"},
+  {"Id":"b","MessageGroupId":"customer-1","MessageDeduplicationId":"$1-B","MessageBody":"{\"jobId\":\"$1-B\",\"imageId\":\"image-456\",\"operation\":\"unsupported\"}"},
+  {"Id":"c","MessageGroupId":"customer-1","MessageDeduplicationId":"$1-C","MessageBody":"{\"jobId\":\"$1-C\",\"imageId\":\"image-456\",\"operation\":\"resize\"}"}
+]
+JSON
+  aws sqs send-message-batch --region "$FIFO_REGION" --queue-url "$FIFO_URL" \
+    --entries "file://$entries" \
+    --query 'Successful[].{Id:Id,MessageId:MessageId,Sequence:SequenceNumber}'
+  rm "$entries"
+}
+
+send_abc job-23-structured
+sleep 180
+aws logs tail "$LOG_GROUP" --region "$FIFO_REGION" --since 10m \
+  --format short --filter-pattern '"job-23-structured"'
+```
+
+Only `B` left the group; `A` and `C` were deleted as soon as the first invocation returned.
+
+```text
+A  processed
+B  failed x3 -> moved out of the group to the DLQ
+C  processed
+```
+
+Check the DLQ and purge it before the next step:
+
+```bash
+aws sqs receive-message --region "$FIFO_REGION" --queue-url "$FIFO_DLQ_URL" \
+  --max-number-of-messages 10 --visibility-timeout 0 \
+  --query 'Messages[].Body'
+aws sqs purge-queue --region "$FIFO_REGION" --queue-url "$FIFO_DLQ_URL"
+```
+
+Expect only `job-23-structured-B` in the DLQ. SQS allows one purge per queue every 60 seconds, so wait that long before purging this DLQ again.
+
+### Outcome 2: the FIFO handler
+
+```bash
+npm run invoke:sqs:fifo
+npm run build:fifo
+terraform -chdir=terraform plan -out=increment-23-handler.tfplan
+terraform -chdir=terraform show increment-23-handler.tfplan
+terraform -chdir=terraform apply increment-23-handler.tfplan
+```
+
+The local invocation should print one `Image job processed` JSON object. The plan should update only the Lambda function's code in place, with no change to the queues, IAM policy, or mappings. Send the same three messages with a new prefix:
+
+```bash
+send_abc job-23-fifo
+sleep 180
+aws logs tail "$LOG_GROUP" --region "$FIFO_REGION" --since 10m \
+  --format short --filter-pattern '"job-23-fifo"'
+```
+
+Expect:
+
+```text
+A  processed
+B  failed on every delivery
+C  not attempted, returned to the queue with B
+```
+
+Check the receive counts and the DLQ:
+
+```bash
+aws sqs get-queue-attributes --region "$FIFO_REGION" --queue-url "$FIFO_URL" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+
+aws sqs receive-message --region "$FIFO_REGION" --queue-url "$FIFO_DLQ_URL" \
+  --max-number-of-messages 10 --visibility-timeout 0 \
+  --message-system-attribute-names MessageGroupId \
+  --query 'Messages[].{Group:Attributes.MessageGroupId,Body:Body,MessageId:MessageId}'
+```
+
+Expect B and C in the DLQ:
+
+```txt
+[
+    {
+        "Group": "customer-1",
+        "Body": "{\"jobId\":\"job-23-fifo-B\",\"imageId\":\"image-456\",\"operation\":\"unsupported\"}",
+        "MessageId": "4bf0..."
+    },
+    {
+        "Group": "customer-1",
+        "Body": "{\"jobId\":\"job-23-fifo-C\",\"imageId\":\"image-456\",\"operation\":\"resize\"}",
+        "MessageId": "e9f..."
+    }
+]
+```
+
+Purge the DLQ afterwards:
+
+```bash
+aws sqs purge-queue --region "$FIFO_REGION" --queue-url "$FIFO_DLQ_URL"
+```
+
+### What to take away
+
+- **Partial batch responses are a deletion list.** Records you do not report are deleted, so what you report decides what stays in the group.
+- **Structured handler:** only the failed record leaves the group; later records in the batch are already done.
+- **FIFO handler:** the failed record and everything after it stay in the group and are retried together.
+- **Unprocessed records are not free.** They are received again with the failed record, so their receive counts rise with it and `maxReceiveCount` can affect messages that never failed.
+- **Batch size:** with batch size 1, as in Increment 22, there are no later records, so the two handlers behave the same.
+- Rollback: set `sqs_fifo_batch_size` back to `1`, run `npm run build`, and apply.
