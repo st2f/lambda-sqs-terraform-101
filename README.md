@@ -1,13 +1,8 @@
 # Lambda + SQS + Terraform 101
 
-This repository is a hands-on lab for learning how a TypeScript and Node.js
-backend behaves when AWS Lambda consumes work from Amazon SQS. Terraform keeps
-the infrastructure and service relationships explicit, while AWS CLI exercises
-make deployed behavior observable.
+This repository is a hands-on lab for learning how a TypeScript and Node.js backend behaves when AWS Lambda consumes work from Amazon SQS. Terraform keeps the infrastructure and service relationships explicit, while AWS CLI exercises make deployed behavior observable.
 
-The image-processing domain is fictional and no images are processed. This is
-a learning environment rather than a production template: each increment
-isolates one AWS or Terraform behavior and verifies it experimentally.
+The image-processing domain is fictional and no images are processed. This is a learning environment rather than a production template: each increment isolates one AWS or Terraform behavior and verifies it experimentally.
 
 ## Learning path
 
@@ -62,10 +57,11 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 23. [FIFO + Partial Batch Failure](docs/05-fifo.md#23-fifo--partial-batch-failure)
 24. [Observe FIFO Concurrency](docs/05-fifo.md#24-observe-fifo-concurrency)
 
-### Planned sections
+### 06 Terraform Versus Runtime
 
-- Increments 25–30: Terraform state, drift, testing, and review
-- Increments 31–32: optional tooling
+- Documentation: [docs/06-terraform-and-runtime.md](docs/06-terraform-and-runtime.md)
+
+25. [Terraform State and Runtime State](docs/06-terraform-and-runtime.md#25-terraform-state-and-runtime-state)
 
 ## Project commands
 
@@ -78,5 +74,4 @@ isolates one AWS or Terraform behavior and verifies it experimentally.
 - `npm run typecheck` — check TypeScript without emitting JavaScript.
 - `npm run check` — run both the type checker and tests.
 
-The detailed documents state each increment's prerequisites, commands in
-execution order, and expected observations.
+See also [docs/AWS-CLI-cheat-sheet.md](docs/AWS-CLI-cheat-sheet.md)
